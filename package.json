@@ -61,7 +61,7 @@
     "bigint",
     "hrtime"
   ],
-  "author": "Eungyu Park (https://github.com/eg97park)",
+  "author": "Eungyu Park <ekpark97.dev@gmail.com> (https://github.com/eg97park)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/eg97park/nanoepoch.git"
