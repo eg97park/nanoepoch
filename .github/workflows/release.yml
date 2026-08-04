@@ -1,0 +1,317 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Tag-driven only. A manual run would have no version to check the tarball
+# against, and the guard below compares the tag to package.json.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NPM_CONFIG_AUDIT: 'false'
+  NPM_CONFIG_FUND: 'false'
+  BUILD_NODE_VERSION: v24.19.0
+
+jobs:
+  build-windows:
+    name: prebuild ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: win32-x64, os: windows-latest }
+          # windows-11-arm moves to a Visual Studio 2026 image in early
+          # September 2026; the weekly CI run is what catches that landing.
+          - { label: win32-arm64, os: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm install --ignore-scripts
+      # No --tag-libc: the libc tag only means something on Linux.
+      - run: npx prebuildify --napi --strip
+      # prebuildify compiles through build/, which would shadow the prebuild in
+      # the verification jobs because node-gyp-build looks there first.
+      - name: Drop the intermediate build directory
+        shell: bash
+        run: rm -rf build
+      - name: Show what was produced
+        shell: bash
+        run: find prebuilds -type f -exec ls -l {} +
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prebuilds-${{ matrix.label }}
+          path: prebuilds/
+          if-no-files-found: error
+
+  build-linux:
+    name: prebuild ${{ matrix.arch }} (glibc + musl)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: ubuntu-latest, manylinux: quay.io/pypa/manylinux_2_28_x86_64 }
+          - { arch: arm64, os: ubuntu-24.04-arm, manylinux: quay.io/pypa/manylinux_2_28_aarch64 }
+    steps:
+      - uses: actions/checkout@v7
+      # Both builds run through `docker run` rather than as container jobs. On
+      # arm64 that is required -- the runner cannot inject a musl Node, so
+      # JavaScript actions fail inside an Alpine container -- and using the same
+      # shape for glibc keeps one code path instead of two.
+      - name: Build the glibc prebuild (glibc 2.28 floor)
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e NODE_VERSION="$BUILD_NODE_VERSION" \
+            ${{ matrix.manylinux }} bash scripts/build-prebuild.sh
+      - name: Build the musl prebuild
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            node:24-alpine sh scripts/build-prebuild.sh
+      - name: Show what was produced
+        run: find prebuilds -type f -exec ls -l {} +
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prebuilds-linux-${{ matrix.arch }}
+          path: prebuilds/
+          if-no-files-found: error
+
+  verify:
+    name: verify ${{ matrix.label }}
+    needs: [build-windows, build-linux]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: win32-x64, os: windows-latest, artifact: prebuilds-win32-x64 }
+          - { label: win32-arm64, os: windows-11-arm, artifact: prebuilds-win32-arm64 }
+          - { label: linux-x64, os: ubuntu-latest, artifact: prebuilds-linux-x64 }
+          - { label: linux-arm64, os: ubuntu-24.04-arm, artifact: prebuilds-linux-arm64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: prebuilds/
+      # --ignore-scripts guarantees nothing gets compiled here: the tests below
+      # run against the artifact that will ship, not against a fresh build.
+      - run: npm install --ignore-scripts
+      - name: Refuse to test a rebuilt binary
+        shell: bash
+        run: test ! -d build
+      - run: npm test
+
+  verify-musl:
+    name: verify linux-${{ matrix.arch }}-musl
+    needs: build-linux
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: ubuntu-latest }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: prebuilds-linux-${{ matrix.arch }}
+          path: prebuilds/
+      - name: Run the suite against the shipped musl binary
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work node:24-alpine sh -c '
+            set -e
+            npm install --ignore-scripts --no-audit --no-fund
+            test ! -d build
+            npm test
+          '
+
+  verify-glibc-floor:
+    name: verify the glibc 2.28 floor
+    needs: build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: prebuilds-linux-x64
+          path: prebuilds/
+      # AlmaLinux 8 shares the manylinux_2_28 lineage, so this is the advertised
+      # floor itself rather than something merely older than the runner.
+      - name: Load the shipped binary on glibc 2.28
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e NODE_VERSION="$BUILD_NODE_VERSION" almalinux:8 bash -c '
+            set -e
+            ldd --version | head -1
+            curl -fsSLO "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-x64.tar.xz"
+            mkdir -p /opt/node && tar xf node-*.tar.xz -C /opt/node --strip-components=1
+            export PATH=/opt/node/bin:$PATH
+            npm install --ignore-scripts --no-audit --no-fund
+            test ! -d build
+            npm test
+          '
+
+  # The verify jobs above load the artifacts from a checkout. This one proves
+  # the actual promise: the published tarball installs and works somewhere that
+  # has no compiler at all.
+  verify-install:
+    name: install the tarball without a toolchain (${{ matrix.arch }})
+    needs: [build-windows, build-linux]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: ubuntu-latest }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: prebuilds-*
+          merge-multiple: true
+          path: prebuilds/
+      - name: Pack the publishable tarball
+        run: |
+          npm pack --pack-destination /tmp
+          mv /tmp/nanoepoch-*.tgz /tmp/nanoepoch.tgz
+      - name: Install and use it in images with no compiler
+        run: |
+          for image in node:22-alpine node:24-alpine node:26-alpine node:22-slim node:24-slim; do
+            echo "=== $image ==="
+            docker run --rm -v /tmp/nanoepoch.tgz:/tmp/nanoepoch.tgz "$image" sh -c '
+              set -e
+              for tool in gcc g++ cc make python3 node-gyp; do
+                if command -v "$tool" >/dev/null 2>&1; then
+                  echo "PRECONDITION FAILED: $tool is present, so this proves nothing"
+                  exit 1
+                fi
+              done
+              mkdir -p /app && cd /app && npm init -y >/dev/null
+              npm install /tmp/nanoepoch.tgz --no-audit --no-fund
+              if [ -d node_modules/nanoepoch/build ]; then
+                echo "FAILED: something compiled"
+                exit 1
+              fi
+              node -e "
+                const { now } = require(\"nanoepoch\");
+                const v = now();
+                if (typeof v !== \"bigint\" || v < 1750000000000000000n || v > 4000000000000000000n) {
+                  throw new Error(\"implausible timestamp: \" + v)
+                }
+                console.log(\"ok:\", v)
+              "
+            '
+          done
+
+  verify-install-windows:
+    name: install the tarball on ${{ matrix.label }}
+    needs: [build-windows, build-linux]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: win32-x64, os: windows-latest }
+          - { label: win32-arm64, os: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: prebuilds-*
+          merge-multiple: true
+          path: prebuilds/
+      # The Visual Studio toolchain cannot be removed from a Windows image, so
+      # --ignore-scripts stands in: it makes a source build impossible, and the
+      # absence of build/ afterwards shows none was attempted.
+      - name: Install the tarball with builds disabled
+        shell: bash
+        run: |
+          npm pack --pack-destination /tmp
+          mkdir -p /tmp/consumer && cd /tmp/consumer && npm init -y >/dev/null
+          npm install /tmp/nanoepoch-*.tgz --ignore-scripts --no-audit --no-fund
+          test ! -d node_modules/nanoepoch/build
+          node -e '
+            const { now } = require("nanoepoch")
+            const v = now()
+            if (typeof v !== "bigint" || v < 1750000000000000000n || v > 4000000000000000000n) {
+              throw new Error("implausible timestamp: " + v)
+            }
+            if (v % 100n !== 0n) throw new Error("not a FILETIME tick multiple: " + v)
+            console.log("ok:", v)
+          '
+
+  publish:
+    name: publish to npm
+    needs: [verify, verify-musl, verify-glibc-floor, verify-install, verify-install-windows]
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      # Trusted publishing: npm exchanges this token for publish rights, so no
+      # npm token exists to leak. Classic tokens were revoked in December 2025
+      # and granular tokens expire within 90 days, which rules them out for
+      # automation anyway. Provenance is attached automatically.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      # Assert rather than install: pulling an unpinned npm@latest into the one
+      # job that holds id-token: write would let a bad registry release run with
+      # publish rights for this package. Node 24 already bundles npm 11.x.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          version=$(npm --version)
+          echo "npm $version"
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number)
+            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)))
+            if (!ok) {
+              console.error("npm " + process.argv[1] + " predates OIDC trusted publishing (needs >= 11.5.1)")
+              process.exit(1)
+            }
+          ' "$version"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: prebuilds-*
+          merge-multiple: true
+          path: prebuilds/
+      - name: Refuse to publish an incomplete set of prebuilds
+        run: node scripts/verify-prebuilds.mjs --expect-version "${GITHUB_REF_NAME}"
+      - name: Show exactly what the tarball will contain
+        run: |
+          npm pack --dry-run
+          npm pack --pack-destination /tmp
+          tar tzf /tmp/nanoepoch-*.tgz | sort
+      - name: Confirm the tarball carries every prebuild
+        run: |
+          tar tzf /tmp/nanoepoch-*.tgz > /tmp/contents.txt
+          count=$(grep -c 'prebuilds/.*\.node$' /tmp/contents.txt || true)
+          if [ "$count" -ne 6 ]; then
+            echo "expected 6 prebuilt binaries in the tarball, found $count"
+            grep 'prebuilds/' /tmp/contents.txt || true
+            exit 1
+          fi
+      - run: npm publish

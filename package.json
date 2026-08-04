@@ -1,0 +1,74 @@
+{
+  "name": "nanoepoch",
+  "version": "0.1.0",
+  "description": "Nanosecond Unix-epoch timestamps read fresh from the OS realtime clock on every call, returned as a BigInt.",
+  "type": "commonjs",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./index.d.mts",
+        "default": "./index.mjs"
+      },
+      "require": {
+        "types": "./index.d.ts",
+        "default": "./index.js"
+      },
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "index.d.mts",
+    "src/",
+    "binding.gyp",
+    "prebuilds/"
+  ],
+  "scripts": {
+    "install": "node-gyp-build",
+    "build": "node-gyp rebuild",
+    "prebuildify": "prebuildify --napi --strip --tag-libc",
+    "test": "node --test",
+    "bench": "node bench/compare.mjs",
+    "attw": "attw --pack .",
+    "prepublishOnly": "node scripts/verify-prebuilds.mjs"
+  },
+  "dependencies": {
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "mitata": "^1.0.34",
+    "node-gyp": "^13.0.1",
+    "prebuildify": "^6.0.1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "nanosecond",
+    "timestamp",
+    "epoch",
+    "unix-time",
+    "wall-clock",
+    "clock_gettime",
+    "CLOCK_REALTIME",
+    "GetSystemTimePreciseAsFileTime",
+    "bigint",
+    "hrtime"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eg97park/nanoepoch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/eg97park/nanoepoch/issues"
+  },
+  "homepage": "https://github.com/eg97park/nanoepoch#readme",
+  "license": "MIT",
+  "sideEffects": false
+}

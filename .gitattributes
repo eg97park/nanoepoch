@@ -1,0 +1,10 @@
+# These scripts are executed inside Linux containers by CI. Checked out with
+# CRLF on a Windows machine they fail with "bad interpreter: no such file or
+# directory", which is a confusing way to learn about line endings.
+*.sh text eol=lf
+
+# Read by Linux runners.
+*.yml text eol=lf
+
+# Compiled addons must never be line-ending converted.
+*.node binary

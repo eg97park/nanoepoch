@@ -1,0 +1,316 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  # The runner images are in active churn (the Visual Studio 2026 migration ran
+  # from June to September 2026). A weekly run separates "we broke it" from
+  # "GitHub changed the image" without waiting for the next pull request.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# These jobs run npm lifecycle scripts and root containers over the checkout.
+# None of them needs to write anything back to the repository.
+permissions:
+  contents: read
+
+env:
+  NPM_CONFIG_AUDIT: 'false'
+  NPM_CONFIG_FUND: 'false'
+  # Pinned so the container jobs below, which have no Node of their own, all
+  # fetch the same one.
+  BUILD_NODE_VERSION: v24.19.0
+
+jobs:
+  test:
+    name: test ${{ matrix.label }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: win-x64, os: windows-latest, node: '22' }
+          - { label: win-x64, os: windows-latest, node: '24' }
+          - { label: win-x64, os: windows-latest, node: '26' }
+          - { label: win-arm64, os: windows-11-arm, node: '24' }
+          - { label: win-arm64, os: windows-11-arm, node: '26' }
+          - { label: linux-x64, os: ubuntu-24.04, node: '22' }
+          - { label: linux-x64, os: ubuntu-24.04, node: '24' }
+          - { label: linux-x64, os: ubuntu-24.04, node: '26' }
+          - { label: linux-arm64, os: ubuntu-24.04-arm, node: '24' }
+          - { label: linux-arm64, os: ubuntu-24.04-arm, node: '26' }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install
+      # windows-latest carries Visual Studio 2026 as of June 2026, and node-gyp
+      # 12.0.x cannot detect it ("unknown version"). We depend on node-gyp ^13
+      # directly and prebuildify resolves node_modules/.bin first, so the check
+      # is on the node-gyp that actually ran -- not on the one npm bundles,
+      # which differs per Node line (Node 22 still ships npm 10.x).
+      - name: Check the node-gyp in use knows Visual Studio 2026
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          version=$(npx node-gyp --version | tr -d 'v')
+          echo "node-gyp $version"
+          node -e '
+            const [major, minor] = process.argv[1].split(".").map(Number)
+            if (major < 12 || (major === 12 && minor < 1)) {
+              console.error("node-gyp " + process.argv[1] + " cannot detect Visual Studio 2026")
+              process.exit(1)
+            }
+          ' "$version"
+      - run: npm test
+
+  test-musl:
+    name: test linux-x64-musl / node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    container: node:${{ matrix.node }}-alpine
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24', '26']
+    steps:
+      - uses: actions/checkout@v7
+      - run: apk add --no-cache build-base python3
+      - run: npm install
+      - run: npm test
+
+  test-musl-arm64:
+    name: test linux-arm64-musl / node 24
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      # Run Alpine through `docker run` rather than as a container job: the
+      # runner cannot inject a musl-arm64 Node, so JavaScript actions such as
+      # checkout fail inside an arm64 Alpine container.
+      - name: Build and test in Alpine
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work node:24-alpine sh -c '
+            apk add --no-cache build-base python3 &&
+            npm install --no-audit --no-fund &&
+            npm test
+          '
+
+  types:
+    name: types resolve for both entries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm install
+      - name: Pack and check the published type declarations
+        run: npx attw --pack . --profile node16
+
+  prebuild-linux-x64:
+    name: prebuild linux-x64 (glibc + musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Built against glibc 2.28, the same floor the official Node binaries
+      # require, so anything that can run a supported Node can load this.
+      - name: Build the glibc prebuild
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e NODE_VERSION="$BUILD_NODE_VERSION" \
+            quay.io/pypa/manylinux_2_28_x86_64 bash scripts/build-prebuild.sh
+      - name: Build the musl prebuild
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            node:24-alpine sh scripts/build-prebuild.sh
+      - name: Show what was produced
+        run: find prebuilds -type f -exec ls -l {} +
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prebuilds-linux-x64
+          path: prebuilds/
+          if-no-files-found: error
+
+  install-proof:
+    name: install without a toolchain (${{ matrix.image }})
+    needs: prebuild-linux-x64
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [node:22-alpine, node:24-alpine, node:26-alpine, node:22-slim, node:24-slim]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: prebuilds-linux-x64
+          path: prebuilds/
+      # Pack the real tarball rather than testing the checkout: this also
+      # catches a "files" whitelist that forgot to ship prebuilds/.
+      - name: Pack the publishable tarball
+        run: |
+          npm pack --pack-destination /tmp
+          mv /tmp/nanoepoch-*.tgz /tmp/nanoepoch.tgz
+          tar tzf /tmp/nanoepoch.tgz | sort
+      - name: Install and use it with no compiler present
+        run: |
+          docker run --rm -v /tmp/nanoepoch.tgz:/tmp/nanoepoch.tgz ${{ matrix.image }} sh -c '
+            set -e
+
+            # Assert the precondition instead of assuming it: if these images
+            # ever ship a compiler, this proof is void and should say so.
+            for tool in gcc g++ cc make python3 node-gyp; do
+              if command -v "$tool" >/dev/null 2>&1; then
+                echo "PRECONDITION FAILED: $tool is present, so this image cannot prove a toolchain-free install"
+                exit 1
+              fi
+            done
+
+            mkdir -p /app && cd /app && npm init -y >/dev/null
+
+            echo "--- install with lifecycle scripts enabled ---"
+            npm install /tmp/nanoepoch.tgz --no-audit --no-fund
+            # A source build cannot happen without leaving build/ behind.
+            if [ -d node_modules/nanoepoch/build ]; then
+              echo "FAILED: node_modules/nanoepoch/build exists, so something compiled"
+              exit 1
+            fi
+            node -e "
+              const { now } = require(\"nanoepoch\");
+              const v = now();
+              if (typeof v !== \"bigint\" || v < 1750000000000000000n || v > 4000000000000000000n) {
+                throw new Error(\"implausible timestamp: \" + v)
+              }
+              console.log(\"ok, scripts enabled:\", v)
+            "
+
+            echo "--- install with --ignore-scripts ---"
+            rm -rf node_modules package-lock.json
+            npm install /tmp/nanoepoch.tgz --ignore-scripts --no-audit --no-fund
+            node -e "console.log(\"ok, scripts ignored:\", require(\"nanoepoch\").now())"
+
+            echo "--- negative control: no binary must mean a loud failure ---"
+            rm -rf node_modules/nanoepoch/prebuilds node_modules/nanoepoch/build
+            if node -e "require(\"nanoepoch\")" 2>/tmp/err; then
+              echo "FAILED: loading succeeded with no native binary present"
+              exit 1
+            fi
+            grep -q "no JavaScript fallback" /tmp/err || { echo "FAILED: error message lost its no-fallback statement"; cat /tmp/err; exit 1; }
+            grep -q "detected" /tmp/err || { echo "FAILED: error message lost the detected platform"; cat /tmp/err; exit 1; }
+            echo "ok, failed loudly:"; head -8 /tmp/err
+          '
+
+  glibc-floor:
+    name: shipped binary loads on glibc 2.28
+    needs: prebuild-linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: prebuilds-linux-x64
+          path: prebuilds/
+      # AlmaLinux 8 is the same lineage as the manylinux_2_28 build image, so
+      # this exercises the exact glibc floor the README advertises. Debian 11
+      # would not: it ships glibc 2.31.
+      - name: Load the prebuilt binary on AlmaLinux 8
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e NODE_VERSION="$BUILD_NODE_VERSION" almalinux:8 bash -c '
+            set -e
+            ldd --version | head -1
+            curl -fsSLO "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-x64.tar.xz"
+            mkdir -p /opt/node && tar xf node-*.tar.xz -C /opt/node --strip-components=1
+            export PATH=/opt/node/bin:$PATH
+            npm install --omit=dev --ignore-scripts --no-audit --no-fund
+            test ! -d build
+            node -e "console.log(\"loaded the shipped binary:\", require(\"./index.js\").now())"
+          '
+
+  clock-step:
+    name: a backward clock step is observed
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm install
+      - name: Step the clock backwards and check who notices
+        run: bash scripts/clock-step/run.sh
+
+  legacy-node-smoke:
+    name: node 20 consumer smoke
+    needs: prebuild-linux-x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v8
+        with:
+          name: prebuilds-linux-x64
+          path: prebuilds/
+      - run: npm pack --pack-destination /tmp
+      # package.json says engines >= 20, so prove the path a Node 20 consumer
+      # actually takes: install the tarball with no devDependencies and load the
+      # prebuilt binary. Building from source is NOT that path -- node-gyp 13
+      # does not support Node 20 -- and testing it would fail for a reason no
+      # consumer would ever hit.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+      - name: Install and load on Node 20
+        run: |
+          mkdir -p /tmp/consumer && cd /tmp/consumer && npm init -y >/dev/null
+          npm install /tmp/nanoepoch-*.tgz --omit=dev --no-audit --no-fund
+          test ! -d node_modules/nanoepoch/build
+          node -e '
+            const { now, nowMicros, nowInto } = require("nanoepoch")
+            const v = now()
+            if (typeof v !== "bigint" || v < 1750000000000000000n || v > 4000000000000000000n) {
+              throw new Error("implausible timestamp: " + v)
+            }
+            const buffer = new BigUint64Array(1)
+            nowInto(buffer)
+            console.log("node 20 consumer path ok:", v, nowMicros(), buffer[0])
+          '
+
+  runtime-smoke:
+    name: ${{ matrix.runtime }} smoke (non-gating)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [bun, deno]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm install
+      - uses: oven-sh/setup-bun@v2
+        if: matrix.runtime == 'bun'
+      - uses: denoland/setup-deno@v2
+        if: matrix.runtime == 'deno'
+        with:
+          deno-version: v2.x
+      # `deno run` has no -e; evaluating a snippet is `deno eval`.
+      - name: Load the addon
+        run: |
+          if [ "${{ matrix.runtime }}" = "bun" ]; then
+            bun -e 'console.log(require("./index.js").now())'
+          else
+            deno eval --allow-read --allow-ffi --allow-env 'import { now } from "./index.js"; console.log(now())'
+          fi
