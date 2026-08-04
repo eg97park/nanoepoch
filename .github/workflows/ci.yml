@@ -306,11 +306,13 @@ jobs:
         if: matrix.runtime == 'deno'
         with:
           deno-version: v2.x
-      # `deno run` has no -e; evaluating a snippet is `deno eval`.
-      - name: Load the addon
+      # `deno run` has no -e, and `deno eval` takes no --allow-* flags: it runs
+      # with every permission already granted, so passing them is an error.
+      - name: Load the addon and call every export
         run: |
+          snippet='const b = new BigUint64Array(1); nowInto(b); console.log("now", now(), "micros", nowMicros(), "into", b[0])'
           if [ "${{ matrix.runtime }}" = "bun" ]; then
-            bun -e 'console.log(require("./index.js").now())'
+            bun -e "const { now, nowMicros, nowInto } = require('./index.js'); $snippet"
           else
-            deno eval --allow-read --allow-ffi --allow-env 'import { now } from "./index.js"; console.log(now())'
+            deno eval "import { now, nowMicros, nowInto } from './index.js'; $snippet"
           fi
