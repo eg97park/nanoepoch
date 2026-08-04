@@ -152,3 +152,7 @@ build/
 # built from.
 prebuilds/
 squishy-tinkering-heron.md
+
+# Deno writes this when a Deno smoke test runs in the repo. This is not a
+# Deno project; the lockfile is a byproduct, not project state.
+deno.lock
