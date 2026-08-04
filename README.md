@@ -183,10 +183,10 @@ Prebuilt binaries ship for:
 
 The glibc builds target glibc 2.28, which is the same floor the official Node.js
 Linux binaries require — so any machine that can run a supported Node can load
-them. Alpine gets its own musl builds; `node-gyp-build` picks the right one at
-require time and refuses the wrong one, so a glibc binary can never be loaded on
-musl. Override the detection with `LIBC=glibc` or `LIBC=musl` if it ever guesses
-wrong.
+them. Alpine gets its own musl builds, and the loader picks between them at
+require time: it guesses cheaply, and if the guess is wrong the other candidate
+is tried, so a mislabelled container cannot leave you without a binary. Force
+the choice with `LIBC=glibc` or `LIBC=musl` to skip the guess entirely.
 
 Tested against Node 22, 24, and 26. `engines` allows Node 20, which is past end
 of life but still widely deployed; it gets a smoke test in CI rather than the
@@ -214,6 +214,10 @@ values look exactly like real ones until the clock is adjusted, at which point
 you have been recording wrong timestamps for hours without any indication. A
 loud failure at deploy time is strictly better than silent data corruption in
 production.
+
+If you would rather not run a binary someone else compiled, `npm install
+nanoepoch --build-from-source` ignores the prebuilds and compiles
+[`src/nanoepoch.c`](src/nanoepoch.c) — about 400 lines — with your own toolchain.
 
 ## Performance
 
@@ -245,13 +249,29 @@ every call, while Node's internal buffer needs no argument parsing at all.
 ## Development
 
 ```sh
-npm install          # builds the addon from source
-npm test             # the full suite
-npm run build        # rebuild the addon after editing src/nanoepoch.c
-npm run bench        # the table above
-npm run prebuildify  # a prebuilt binary for the current platform
-npm run attw         # check the published type declarations resolve
+npm install            # builds the addon from source
+npm test               # the full suite
+npm run build          # rebuild the addon after editing src/nanoepoch.c
+npm run bench          # the table above
+npm run make-prebuild  # a prebuilt binary for the current platform
+npm run attw           # check the published type declarations resolve
 ```
+
+`make-prebuild` is not called `prebuild` because npm would silently run it as
+the pre-hook of `build`.
+
+A local build wins over a bundled prebuild, so `npm run build` is what you end
+up testing. The corollary is that a stale `build/` keeps shadowing the shipped
+binary until you delete it — if a prebuild seems not to take effect, `rm -rf
+build` first.
+
+nanoepoch has **no runtime dependencies**, and two development ones: `node-gyp`
+to compile, and `mitata` to benchmark. Resolving which prebuilt binary to load
+is about sixty lines at the top of [`index.js`](index.js) rather than a
+dependency, and producing one is [`scripts/prebuild.mjs`](scripts/prebuild.mjs)
+rather than another. For a package whose entire claim is that its numbers come
+from the OS and nowhere else, the install footprint should be auditable in one
+sitting.
 
 The suite separates gates from reports on purpose: assertions cover only what
 the OS actually guarantees (value ranges, the Windows 100ns tick, epoch

@@ -11,20 +11,19 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
-const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const nanoepoch = require('../index.js')
-// The raw binding is loaded directly so the two candidate now() strategies can
-// be compared; published code only ever exposes the winner as nanoepoch.now().
-const binding = require('node-gyp-build')(packageRoot)
 
 // The forbidden technique, inlined so it can never be imported by accident:
 // anchor once, then report anchor + elapsed monotonic time forever.
 const anchorNs = BigInt(Date.now()) * 1_000_000n - process.hrtime.bigint()
 const anchoredNow = () => anchorNs + process.hrtime.bigint()
 
+// The rejected now() strategy, reconstructed from the shipped primitives: have
+// the addon write into a shared slot and read the BigInt back out in JS, the
+// way process.hrtime.bigint() does internally.
 const slot = new BigUint64Array(1)
 const nowViaSlot = () => {
-  binding.nowInto(slot)
+  nanoepoch.nowInto(slot)
   return slot[0]
 }
 
@@ -48,7 +47,7 @@ summary(() => {
 })
 
 summary(() => {
-  bench('now() strategy: native BigInt return', () => do_not_optimize(binding.now()))
+  bench('now() strategy: native BigInt return', () => do_not_optimize(nanoepoch.now()))
   bench('now() strategy: shared slot + read', () => do_not_optimize(nowViaSlot()))
 })
 

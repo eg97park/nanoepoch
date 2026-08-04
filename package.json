@@ -1,6 +1,6 @@
 {
   "name": "nanoepoch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Nanosecond Unix-epoch timestamps read fresh from the OS realtime clock on every call, returned as a BigInt.",
   "type": "commonjs",
   "main": "./index.js",
@@ -26,25 +26,21 @@
     "index.d.mts",
     "src/",
     "binding.gyp",
+    "scripts/install.js",
     "prebuilds/"
   ],
   "scripts": {
-    "install": "node-gyp-build",
+    "install": "node scripts/install.js",
     "build": "node-gyp rebuild",
-    "prebuildify": "prebuildify --napi --strip --tag-libc",
+    "make-prebuild": "node scripts/prebuild.mjs",
     "test": "node --test",
     "bench": "node bench/compare.mjs",
-    "attw": "attw --pack .",
+    "attw": "npx --yes @arethetypeswrong/cli@0.18.5 --pack . --profile node16",
     "prepublishOnly": "node scripts/verify-prebuilds.mjs"
   },
-  "dependencies": {
-    "node-gyp-build": "^4.8.4"
-  },
   "devDependencies": {
-    "@arethetypeswrong/cli": "^0.18.5",
     "mitata": "^1.0.34",
-    "node-gyp": "^13.0.1",
-    "prebuildify": "^6.0.1"
+    "node-gyp": "^13.0.1"
   },
   "engines": {
     "node": ">=20"

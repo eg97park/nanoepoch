@@ -36,10 +36,12 @@ jobs:
         with:
           node-version: '24'
       - run: npm install --ignore-scripts
-      # No --tag-libc: the libc tag only means something on Linux.
-      - run: npx prebuildify --napi --strip
-      # prebuildify compiles through build/, which would shadow the prebuild in
-      # the verification jobs because node-gyp-build looks there first.
+      # The script tags the filename with a libc only on Linux, so nothing to
+      # pass here. Named make-prebuild because npm would treat a script called
+      # "prebuild" as the implicit pre-hook of "build".
+      - run: npm run make-prebuild
+      # The build goes through build/, which would shadow the prebuild in the
+      # verification jobs because the loader looks there first.
       - name: Drop the intermediate build directory
         shell: bash
         run: rm -rf build

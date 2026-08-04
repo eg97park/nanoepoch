@@ -53,9 +53,10 @@ jobs:
       - run: npm install
       # windows-latest carries Visual Studio 2026 as of June 2026, and node-gyp
       # 12.0.x cannot detect it ("unknown version"). We depend on node-gyp ^13
-      # directly and prebuildify resolves node_modules/.bin first, so the check
-      # is on the node-gyp that actually ran -- not on the one npm bundles,
-      # which differs per Node line (Node 22 still ships npm 10.x).
+      # directly, and both scripts/install.js and scripts/prebuild.mjs resolve
+      # node-gyp as a package before falling back to PATH, so the check is on
+      # the node-gyp that actually ran -- not on the one npm bundles, which
+      # differs per Node line (Node 22 still ships npm 10.x).
       - name: Check the node-gyp in use knows Visual Studio 2026
         if: runner.os == 'Windows'
         shell: bash
@@ -110,8 +111,12 @@ jobs:
         with:
           node-version: '24'
       - run: npm install
+      # attw is fetched here rather than declared as a devDependency: it brings
+      # 53 packages for a check that runs in exactly one job, and installing it
+      # for every contributor and every other job is the larger cost. The
+      # version is pinned in the npm script.
       - name: Pack and check the published type declarations
-        run: npx attw --pack . --profile node16
+        run: npm run attw
 
   prebuild-linux-x64:
     name: prebuild linux-x64 (glibc + musl)

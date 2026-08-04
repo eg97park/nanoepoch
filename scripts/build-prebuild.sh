@@ -42,15 +42,18 @@ rm -rf node_modules build
 # --ignore-scripts so the install step does not build the addon a second time.
 npm install --ignore-scripts --no-audit --no-fund
 
-# --tag-libc puts ".glibc" or ".musl" in the filename. node-gyp-build reads that
-# tag at require time and refuses a binary built for the other libc, so both can
-# live in one prebuilds/linux-x64/ directory without an Alpine host ever loading
-# the glibc build.
-npx prebuildify --napi --strip --tag-libc
+# Detects its own libc and puts ".glibc" or ".musl" in the filename. The loader
+# reads that tag at require time and refuses a binary built for the other libc,
+# so both can live in one prebuilds/linux-x64/ directory without an Alpine host
+# ever loading the glibc build.
+#
+# Named make-prebuild, not prebuild: npm would treat a script called "prebuild"
+# as the implicit pre-hook of "build" and run it on every npm run build.
+npm run make-prebuild
 
-# prebuildify compiles through build/ on the way to prebuilds/. Leaving it
-# behind would shadow the prebuild, because node-gyp-build looks in build/
-# first -- and the point of the following jobs is to exercise what ships.
+# The build goes through build/ on the way to prebuilds/. Leaving it behind
+# would shadow the prebuild, because the loader looks in build/ first -- and the
+# point of the following jobs is to exercise what ships.
 rm -rf build
 
 find prebuilds -type f -exec ls -l {} +

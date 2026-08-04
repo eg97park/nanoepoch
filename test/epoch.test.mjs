@@ -97,7 +97,10 @@ test('the tick argument is validated', () => {
   assert.throws(() => filetimeToNs(2n ** 64n), { name: 'RangeError' })
 })
 
-test('the test hook stays out of the public surface', () => {
+test('the test hooks stay out of the public surface', () => {
   assert.deepEqual(Object.keys(nanoepoch), ['now', 'nowMicros', 'nowInto'])
-  assert.equal(Object.propertyIsEnumerable.call(nanoepoch, '_filetimeToNs'), false)
+  for (const hook of ['_filetimeToNs', '_candidateNames']) {
+    assert.equal(Object.propertyIsEnumerable.call(nanoepoch, hook), false, `${hook} should not be enumerable`)
+    assert.notEqual(nanoepoch[hook], undefined, `${hook} should still be reachable for the tests`)
+  }
 })
