@@ -69,22 +69,27 @@ function nodeGyp () {
   }
 }
 
+// A present --libc always decides the answer, including when its value is
+// missing or wrong. Falling back to autodetection there would answer a
+// question the caller explicitly took out of our hands, and the wrong answer
+// is a mislabelled binary in the release. Validated on every platform even
+// though only Linux uses it: a typo should not depend on where it was typed.
+function forcedLibc () {
+  const flag = process.argv.indexOf('--libc')
+  if (flag === -1) return undefined
+  const forced = process.argv[flag + 1]
+  if (forced !== 'glibc' && forced !== 'musl') {
+    fail(`--libc must be glibc or musl, got ${forced === undefined ? 'nothing' : JSON.stringify(forced)}`)
+  }
+  return forced
+}
+
 // The libc a Linux binary was built against becomes part of its filename, and
 // the loader refuses the other one. Unlike the loader, this can afford the
 // authoritative check: it runs once per build, not once per require.
-function libcTag () {
+function libcTag (forced) {
   if (process.platform !== 'linux') return ''
-
-  // A present --libc always decides the answer, including when its value is
-  // missing or wrong. Falling back to autodetection there would answer a
-  // question the caller explicitly took out of our hands, and the wrong answer
-  // is a mislabelled binary in the release.
-  const flag = process.argv.indexOf('--libc')
-  if (flag !== -1) {
-    const forced = process.argv[flag + 1]
-    if (forced !== 'glibc' && forced !== 'musl') fail(`--libc must be glibc or musl, got ${forced === undefined ? 'nothing' : JSON.stringify(forced)}`)
-    return `.${forced}`
-  }
+  if (forced !== undefined) return `.${forced}`
 
   let glibc
   try {
@@ -94,6 +99,10 @@ function libcTag () {
   }
   return glibc ? '.glibc' : '.musl'
 }
+
+// Resolved BEFORE the compile: a bad --libc or an undetectable libc should
+// cost milliseconds, not surface after minutes of node-gyp output.
+const tag = libcTag(forcedLibc())
 
 const gyp = nodeGyp()
 run(gyp.command, gyp.args, { shell: gyp.shell })
@@ -121,7 +130,7 @@ if (process.platform === 'linux' || process.platform === 'darwin') {
 }
 
 const targetDir = join(packageRoot, 'prebuilds', `${process.platform}-${process.arch}`)
-const target = join(targetDir, `${name}${libcTag()}.node`)
+const target = join(targetDir, `${name}${tag}.node`)
 mkdirSync(targetDir, { recursive: true })
 copyFileSync(source, target)
 

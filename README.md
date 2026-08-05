@@ -246,6 +246,32 @@ and read the slot back in JavaScript — measured about 1.9x *slower* on both
 platforms, because that path has to locate and bounds-check a typed array on
 every call, while Node's internal buffer needs no argument parsing at all.
 
+## Supply chain
+
+A package whose entire claim is that its numbers come from the OS and nowhere
+else should be auditable in one sitting, so:
+
+- **Zero runtime dependencies.** Resolving which prebuilt binary to load is
+  about sixty lines at the top of [`index.js`](index.js), not a dependency.
+  The install script ([`scripts/install.js`](scripts/install.js)) spawns
+  node-gyp and nothing else.
+- **The binaries ship inside the tarball**, so npm provenance covers them —
+  they are built by the public [release workflow](.github/workflows/release.yml)
+  on GitHub-hosted runners, and the attestation ties the tarball to the exact
+  commit and workflow run. Verify with:
+
+  ```sh
+  npm audit signatures
+  ```
+
+- **Publishing uses OIDC trusted publishing** — no long-lived npm token exists
+  to leak. The workflow pins every GitHub Action to a full commit SHA, and the
+  release gate ([`scripts/verify-prebuilds.mjs`](scripts/verify-prebuilds.mjs))
+  reads each binary's ELF/PE header before publish, refusing a release where
+  any binary's architecture or libc disagrees with its filename.
+- **You can opt out of the binaries entirely**: `npm install nanoepoch
+  --build-from-source` compiles the ~400 lines of C with your own toolchain.
+
 ## Development
 
 ```sh
@@ -257,6 +283,11 @@ npm run make-prebuild  # a prebuilt binary for the current platform
 npm run attw           # check the published type declarations resolve
 ```
 
+Building from source needs Node 22.22 or newer — the `node-gyp` devDependency
+supports `^22.22.2 || ^24.15.0 || >=26`. Consumers are unaffected: the
+published package installs a prebuilt binary on anything `engines` allows
+(Node >= 20).
+
 `make-prebuild` is not called `prebuild` because npm would silently run it as
 the pre-hook of `build`.
 
@@ -265,13 +296,8 @@ up testing. The corollary is that a stale `build/` keeps shadowing the shipped
 binary until you delete it — if a prebuild seems not to take effect, `rm -rf
 build` first.
 
-nanoepoch has **no runtime dependencies**, and two development ones: `node-gyp`
-to compile, and `mitata` to benchmark. Resolving which prebuilt binary to load
-is about sixty lines at the top of [`index.js`](index.js) rather than a
-dependency, and producing one is [`scripts/prebuild.mjs`](scripts/prebuild.mjs)
-rather than another. For a package whose entire claim is that its numbers come
-from the OS and nowhere else, the install footprint should be auditable in one
-sitting.
+nanoepoch has two development dependencies: `node-gyp` to compile and `mitata`
+to benchmark.
 
 The suite separates gates from reports on purpose: assertions cover only what
 the OS actually guarantees (value ranges, the Windows 100ns tick, epoch

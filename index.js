@@ -95,7 +95,13 @@ function resolveCandidates () {
 
 function detectLibc () {
   if (process.platform !== 'linux') return null
-  if (process.env.LIBC) return process.env.LIBC + ' (forced by the LIBC environment variable)'
+  // Mirror candidateNames() exactly: only the two recognised values force the
+  // choice. Calling anything else "forced" would tell the reader an override
+  // took effect when the resolver ignored it.
+  if (process.env.LIBC === 'glibc' || process.env.LIBC === 'musl') {
+    return process.env.LIBC + ' (forced by the LIBC environment variable)'
+  }
+  if (process.env.LIBC) return process.env.LIBC + ' (ignored: LIBC must be "glibc" or "musl")'
   // Only the diagnostic path pays for the authoritative check; see candidateNames().
   try {
     const report = process.report.getReport()

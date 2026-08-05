@@ -1,0 +1,14 @@
+# The workflows pin every action to a full commit SHA (the release workflow
+# holds id-token: write, so a hijacked mutable tag there would hold publish
+# rights for this package). Pins rot; this keeps them moving through reviewed
+# pull requests instead of by hand.
+#
+# No npm ecosystem entry: the package has zero runtime dependencies and two
+# devDependencies, which are cheaper to bump deliberately than to triage weekly.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

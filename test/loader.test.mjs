@@ -235,4 +235,13 @@ test('an unknown LIBC value is ignored rather than obeyed into a dead end', {
   // detection, which still works, instead of naming a file that cannot exist.
   const result = load(root, { LIBC: 'gnu' })
   assert.ok(result.ok, `an unrecognised LIBC should fall back to detection, got:\n${result.stderr}`)
+
+  // And when that degraded path still fails, the diagnostic must say the value
+  // was ignored -- not claim an override took effect that the resolver never
+  // honoured.
+  const empty = makeFixture({})
+  const failed = load(empty, { LIBC: 'gnu' })
+  assert.equal(failed.ok, false)
+  assert.match(failed.stderr, /gnu \(ignored: LIBC must be "glibc" or "musl"\)/)
+  assert.doesNotMatch(failed.stderr, /forced by the LIBC environment variable/)
 })

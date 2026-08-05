@@ -23,23 +23,31 @@ const packageRoot = path.join(__dirname, '..')
 // package like this one is a reasonable thing to want.
 const buildFromSource = process.env.npm_config_build_from_source === 'true'
 
-// The install-time check is deliberately the runtime check. Anything less --
-// looking for a file, guessing at libc -- can disagree with the loader, and a
-// disagreement here means either a pointless compile or a missed one.
-if (!buildFromSource) {
-  try {
-    require(path.join(packageRoot, 'index.js'))
-    process.exit(0)
-  } catch (error) {
-    // The addon loaded but the platform clock is unusable. Compiling the same
-    // source again cannot change that, and hiding the reason behind a build log
-    // would be worse than stopping here.
-    if (error && typeof error.code === 'string' && error.code.startsWith('ERR_NANOEPOCH_') &&
-        error.code !== 'ERR_NANOEPOCH_LOAD_FAILED') {
-      console.error(error.message)
-      process.exit(1)
+// Exit discipline: failures set process.exitCode and fall off the end of the
+// script instead of calling process.exit(), which on Windows can cut off
+// console.error output still queued on an async pipe -- and these messages are
+// the only thing standing between the user and a bare exit code.
+function main () {
+  // The install-time check is deliberately the runtime check. Anything less --
+  // looking for a file, guessing at libc -- can disagree with the loader, and
+  // a disagreement here means either a pointless compile or a missed one.
+  if (!buildFromSource) {
+    try {
+      require(path.join(packageRoot, 'index.js'))
+      return
+    } catch (error) {
+      // The addon loaded but the platform clock is unusable. Compiling the
+      // same source again cannot change that, and hiding the reason behind a
+      // build log would be worse than stopping here.
+      if (error && typeof error.code === 'string' && error.code.startsWith('ERR_NANOEPOCH_') &&
+          error.code !== 'ERR_NANOEPOCH_LOAD_FAILED') {
+        console.error(error.message)
+        process.exitCode = 1
+        return
+      }
     }
   }
+  build()
 }
 
 // Prefer this package's OWN node-gyp devDependency, which exists only when the
@@ -73,15 +81,17 @@ function nodeGypCommand () {
   }
 }
 
-const { command, args, shell } = nodeGypCommand()
-const result = spawnSync(command, args, {
-  cwd: packageRoot,
-  stdio: 'inherit',
-  shell,
-  windowsHide: true
-})
+function build () {
+  const { command, args, shell } = nodeGypCommand()
+  const result = spawnSync(command, args, {
+    cwd: packageRoot,
+    stdio: 'inherit',
+    shell,
+    windowsHide: true
+  })
 
-if (result.error || result.status !== 0) {
+  if (!result.error && result.status === 0) return
+
   // Say what actually went wrong before the generic advice. A spawn that never
   // started (no node-gyp on PATH at all) and a compiler that rejected the
   // source have completely different fixes, and only this line distinguishes
@@ -103,5 +113,7 @@ if (result.error || result.status !== 0) {
     '  Windows       : Visual Studio Build Tools, "Desktop development with C++"',
     ''
   ].join('\n'))
-  process.exit(result.status === 0 || result.status === null ? 1 : result.status)
+  process.exitCode = result.status === 0 || result.status === null ? 1 : result.status
 }
+
+main()
