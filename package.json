@@ -1,6 +1,6 @@
 {
   "name": "nanoepoch",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Nanosecond Unix-epoch timestamps read fresh from the OS realtime clock on every call, returned as a BigInt.",
   "type": "commonjs",
   "main": "./index.js",
@@ -25,12 +25,9 @@
     "index.d.ts",
     "index.d.mts",
     "src/",
-    "binding.gyp",
-    "scripts/install.js",
     "prebuilds/"
   ],
   "scripts": {
-    "install": "node scripts/install.js",
     "build": "node-gyp rebuild",
     "make-prebuild": "node scripts/prebuild.mjs",
     "test": "node --test",

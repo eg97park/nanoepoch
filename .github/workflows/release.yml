@@ -54,6 +54,39 @@ jobs:
           path: prebuilds/
           if-no-files-found: error
 
+  build-macos:
+    name: prebuild ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: darwin-arm64, os: macos-latest }
+          # macos-15-intel is the last x86_64 macOS image GitHub will offer; it
+          # is supported until autumn 2027, and macos-13 was already retired in
+          # December 2025. When it goes, this row becomes a cross-compile from
+          # the arm64 runner (clang -arch x86_64) or the target is dropped.
+          - { label: darwin-x64, os: macos-15-intel }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: npm install --ignore-scripts
+      # The Node headers carry MACOSX_DEPLOYMENT_TARGET=13.5 (node/common.gypi),
+      # so the binary's minimum OS follows the Node line these are built with,
+      # not the runner's macOS version. That floor is in the README.
+      - run: npm run make-prebuild
+      - name: Drop the intermediate build directory
+        run: rm -rf build
+      - name: Show what was produced
+        run: find prebuilds -type f -exec ls -l {} +
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prebuilds-${{ matrix.label }}
+          path: prebuilds/
+          if-no-files-found: error
+
   build-linux:
     name: prebuild ${{ matrix.arch }} (glibc + musl)
     runs-on: ${{ matrix.os }}
@@ -88,7 +121,7 @@ jobs:
 
   verify:
     name: verify ${{ matrix.label }}
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -98,6 +131,8 @@ jobs:
           - { label: win32-arm64, os: windows-11-arm, artifact: prebuilds-win32-arm64 }
           - { label: linux-x64, os: ubuntu-latest, artifact: prebuilds-linux-x64 }
           - { label: linux-arm64, os: ubuntu-24.04-arm, artifact: prebuilds-linux-arm64 }
+          - { label: darwin-arm64, os: macos-latest, artifact: prebuilds-darwin-arm64 }
+          - { label: darwin-x64, os: macos-15-intel, artifact: prebuilds-darwin-x64 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -171,7 +206,7 @@ jobs:
   # has no compiler at all.
   verify-install:
     name: install the tarball without a toolchain (${{ matrix.arch }})
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -224,7 +259,7 @@ jobs:
 
   verify-install-windows:
     name: install the tarball on ${{ matrix.label }}
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -242,15 +277,18 @@ jobs:
           pattern: prebuilds-*
           merge-multiple: true
           path: prebuilds/
-      # The Visual Studio toolchain cannot be removed from a Windows image, so
-      # --ignore-scripts stands in: it makes a source build impossible, and the
-      # absence of build/ afterwards shows none was attempted.
-      - name: Install the tarball with builds disabled
+      # The Visual Studio toolchain cannot be removed from a Windows image, and
+      # that is exactly what makes this the sharpest test available: lifecycle
+      # scripts stay ENABLED on a machine that could compile, so an empty build/
+      # afterwards proves npm found nothing to build. It would not, if the
+      # tarball still carried binding.gyp -- npm runs node-gyp on that file with
+      # no install script in sight.
+      - name: Install the tarball where a compiler is available
         shell: bash
         run: |
           npm pack --pack-destination /tmp
           mkdir -p /tmp/consumer && cd /tmp/consumer && npm init -y >/dev/null
-          npm install /tmp/nanoepoch-*.tgz --ignore-scripts --no-audit --no-fund
+          npm install /tmp/nanoepoch-*.tgz --no-audit --no-fund
           test ! -d node_modules/nanoepoch/build
           node -e '
             const { now } = require("nanoepoch")
@@ -261,10 +299,67 @@ jobs:
             if (v % 100n !== 0n) throw new Error("not a FILETIME tick multiple: " + v)
             console.log("ok:", v)
           '
+      - name: And again with lifecycle scripts disabled
+        shell: bash
+        run: |
+          cd /tmp/consumer
+          rm -rf node_modules package-lock.json
+          npm install /tmp/nanoepoch-*.tgz --ignore-scripts --no-audit --no-fund
+          test ! -d node_modules/nanoepoch/build
+          node -e 'console.log("ok, scripts ignored:", require("nanoepoch").now())'
+
+  # macOS joined the prebuild matrix in 0.3.0, at the same time as the install
+  # script left. Same shape as the Windows job: Xcode Command Line Tools are on
+  # the image and cannot be removed, so a scripts-enabled install that leaves no
+  # build/ is the proof that nothing compiles at install time any more.
+  verify-install-macos:
+    name: install the tarball on ${{ matrix.label }}
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: darwin-arm64, os: macos-latest }
+          - { label: darwin-x64, os: macos-15-intel }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: prebuilds-*
+          merge-multiple: true
+          path: prebuilds/
+      - name: Install the tarball where a compiler is available
+        run: |
+          xcode-select -p
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer" && npm init -y >/dev/null
+          npm install "$RUNNER_TEMP"/nanoepoch-*.tgz --no-audit --no-fund
+          test ! -d node_modules/nanoepoch/build
+          node -e '
+            const { now, nowMicros, nowInto } = require("nanoepoch")
+            const v = now()
+            if (typeof v !== "bigint" || v < 1750000000000000000n || v > 4000000000000000000n) {
+              throw new Error("implausible timestamp: " + v)
+            }
+            const buffer = new BigUint64Array(1)
+            nowInto(buffer)
+            console.log("ok:", v, nowMicros(), buffer[0])
+          '
+      - name: And again with lifecycle scripts disabled
+        run: |
+          cd "$RUNNER_TEMP/consumer"
+          rm -rf node_modules package-lock.json
+          npm install "$RUNNER_TEMP"/nanoepoch-*.tgz --ignore-scripts --no-audit --no-fund
+          test ! -d node_modules/nanoepoch/build
+          node -e 'console.log("ok, scripts ignored:", require("nanoepoch").now())'
 
   publish:
     name: publish to npm
-    needs: [verify, verify-musl, verify-glibc-floor, verify-install, verify-install-windows]
+    needs: [verify, verify-musl, verify-glibc-floor, verify-install, verify-install-windows, verify-install-macos]
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
@@ -311,11 +406,23 @@ jobs:
         run: |
           tar tzf /tmp/nanoepoch-*.tgz > /tmp/contents.txt
           count=$(grep -c 'prebuilds/.*\.node$' /tmp/contents.txt || true)
-          if [ "$count" -ne 6 ]; then
-            echo "expected 6 prebuilt binaries in the tarball, found $count"
+          if [ "$count" -ne 8 ]; then
+            echo "expected 8 prebuilt binaries in the tarball, found $count"
             grep 'prebuilds/' /tmp/contents.txt || true
             exit 1
           fi
+      # Dropping the install script is only half of the promise: npm compiles a
+      # package whose tarball root holds a binding.gyp even when no install
+      # script exists anywhere. Only the tarball can be checked for that, and
+      # only here -- the repository keeps its binding.gyp on purpose.
+      - name: Confirm the tarball runs nothing at install time
+        run: |
+          if grep -qE '^package/(binding\.gyp|scripts/)' /tmp/contents.txt; then
+            echo "the tarball carries files npm would run or build at install time:"
+            grep -E '^package/(binding\.gyp|scripts/)' /tmp/contents.txt
+            exit 1
+          fi
+          echo "no binding.gyp and no scripts/ in the tarball"
       - run: npm publish
 
   # Mirrors the npm release on the repository's Releases tab. A separate job so

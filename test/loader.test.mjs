@@ -179,10 +179,16 @@ test('no binary at all fails loudly and says why there is no fallback', () => {
   // The names it looked for are the difference between "we shipped you nothing"
   // and "we shipped you the other libc".
   assert.match(result.stderr, /looked {3}: nanoepoch/)
+  // The advertised matrix, which is what someone on an unsupported platform
+  // reads before deciding between filing a bug and installing a compiler. Both
+  // macOS rows are new in 0.3.0 and are the reason this line is pinned.
+  assert.match(result.stderr, /prebuilt : .*linux-arm64 \(glibc and musl\), darwin-arm64, darwin-x64/)
   // Pin the branch, not just the label: all four verdicts match /verdict {2}: /,
   // and telling a supported platform it is unsupported is the failure that
   // sends someone installing a compiler they do not need.
-  const supported = ['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64'].includes(target)
+  const supported = [
+    'win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64', 'darwin-arm64', 'darwin-x64'
+  ].includes(target)
   assert.match(result.stderr, supported
     ? /verdict {2}: your platform IS in the prebuilt matrix but this install contains no binaries at all/
     : /verdict {2}: your platform is NOT in the prebuilt matrix/)

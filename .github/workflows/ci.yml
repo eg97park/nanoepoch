@@ -45,18 +45,26 @@ jobs:
           - { label: linux-x64, os: ubuntu-24.04, node: '26' }
           - { label: linux-arm64, os: ubuntu-24.04-arm, node: '24' }
           - { label: linux-arm64, os: ubuntu-24.04-arm, node: '26' }
+          # macOS entered the prebuild matrix in 0.3.0, so the source build it
+          # used to get only through an install script now needs real coverage.
+          - { label: darwin-arm64, os: macos-latest, node: '24' }
+          - { label: darwin-arm64, os: macos-latest, node: '26' }
+          - { label: darwin-x64, os: macos-15-intel, node: '24' }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-      - run: npm install
+      # Install and build are two steps on purpose. The repository still holds a
+      # binding.gyp -- it is only kept out of the tarball -- so a bare
+      # `npm install` would compile through npm's IMPLICIT node-gyp invocation,
+      # which uses whichever node-gyp npm bundles (10.x on the Node 22 line, and
+      # that one cannot detect Visual Studio 2026). Installing with scripts off
+      # and running `npm run build` puts the pinned ^13 devDependency back in
+      # charge, which is what the check below then measures.
+      - run: npm install --ignore-scripts
       # windows-latest carries Visual Studio 2026 as of June 2026, and node-gyp
-      # 12.0.x cannot detect it ("unknown version"). We depend on node-gyp ^13
-      # directly, and both scripts/install.js and scripts/prebuild.mjs resolve
-      # node-gyp as a package before falling back to PATH, so the check is on
-      # the node-gyp that actually ran -- not on the one npm bundles, which
-      # differs per Node line (Node 22 still ships npm 10.x).
+      # 12.0.x cannot detect it ("unknown version").
       - name: Check the node-gyp in use knows Visual Studio 2026
         if: runner.os == 'Windows'
         shell: bash
@@ -70,6 +78,7 @@ jobs:
               process.exit(1)
             }
           ' "$version"
+      - run: npm run build
       - run: npm test
 
   test-musl:
@@ -83,7 +92,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: apk add --no-cache build-base python3
-      - run: npm install
+      # Two steps for the same reason as the job above: build through the pinned
+      # node-gyp devDependency, not through npm's implicit invocation.
+      - run: npm install --ignore-scripts
+      - run: npm run build
       - run: npm test
 
   test-musl-arm64:
@@ -98,7 +110,8 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/work" -w /work node:24-alpine sh -c '
             apk add --no-cache build-base python3 &&
-            npm install --no-audit --no-fund &&
+            npm install --ignore-scripts --no-audit --no-fund &&
+            npm run build &&
             npm test
           '
 
@@ -110,7 +123,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm install
+      # attw packs the tarball and reads the declarations; nothing here needs a
+      # compiled addon, so skip the build the repository's binding.gyp would
+      # otherwise trigger.
+      - run: npm install --ignore-scripts
       # attw is fetched here rather than declared as a devDependency: it brings
       # 53 packages for a check that runs in exactly one job, and installing it
       # for every contributor and every other job is the larger cost. The
@@ -250,7 +266,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm install
+      - run: npm install --ignore-scripts
+      - run: npm run build
       - name: Step the clock backwards and check who notices
         run: bash scripts/clock-step/run.sh
 
@@ -305,7 +322,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm install
+      - run: npm install --ignore-scripts
+      - run: npm run build
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: matrix.runtime == 'bun'
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5

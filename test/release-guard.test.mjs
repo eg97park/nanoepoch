@@ -4,9 +4,11 @@
 // real one from this checkout, every corruption one a broken merge could
 // produce -- and assert it refuses each with a message naming the actual fault.
 //
-// Skipped wholesale when the checkout does not carry all six prebuilds, which
+// Skipped wholesale when the checkout does not carry all eight prebuilds, which
 // is the normal state right after clone: the fixtures are built by cross-
 // planting real binaries between directories, so all of them have to exist.
+// The Mach-O and tarball tests below are built from synthesised bytes instead
+// and run everywhere.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -25,11 +27,13 @@ const EXPECTED = [
   'linux-x64/nanoepoch.glibc.node',
   'linux-x64/nanoepoch.musl.node',
   'linux-arm64/nanoepoch.glibc.node',
-  'linux-arm64/nanoepoch.musl.node'
+  'linux-arm64/nanoepoch.musl.node',
+  'darwin-arm64/nanoepoch.node',
+  'darwin-x64/nanoepoch.node'
 ]
 
 const haveAll = EXPECTED.every((relative) => existsSync(join(packageRoot, 'prebuilds', relative)))
-const skip = haveAll ? false : 'needs all six prebuilds (a release checkout); run the release build first'
+const skip = haveAll ? false : 'needs all eight prebuilds (a release checkout); run the release build first'
 
 const fixtures = []
 
@@ -137,4 +141,117 @@ test('a missing prebuild is still refused with the exact path', { skip }, () => 
   const { status, out } = run(root)
   assert.equal(status, 1)
   assert.match(out, /missing prebuild: prebuilds\/win32-arm64\/nanoepoch\.node/)
+})
+
+// The macOS cases use synthesised headers rather than real binaries: a Mach-O
+// file only appears in a checkout built on a Mac, while the guard reads eight
+// bytes that can be written by hand. The other six prebuilds are left missing
+// on purpose -- those faults are reported too, and the assertions below look
+// only at whether darwin was faulted.
+const CPU_TYPE = { arm64: 0x0100000C, x64: 0x01000007 }
+const MH_MAGIC_64 = 0xFEEDFACF
+const FAT_MAGIC = 0xCAFEBABE
+
+// 8KB clears the 4096-byte floor, so what these exercise is the header check
+// and not the size check that runs before it.
+function machO (cpuType, magic = MH_MAGIC_64) {
+  const file = Buffer.alloc(8192)
+  file.writeUInt32LE(magic, 0)
+  file.writeUInt32LE(cpuType, 4)
+  return file
+}
+
+function darwinTree (files) {
+  const root = mkdtempSync(join(tmpdir(), 'nanoepoch-macho-'))
+  fixtures.push(root)
+  for (const [relative, content] of Object.entries(files)) {
+    const target = join(root, 'prebuilds', ...relative.split('/'))
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, content)
+  }
+  return root
+}
+
+// Only the problem lines are under test. The "found:" listing printed after
+// them names every file, darwin included, whether or not anything was wrong.
+function faults (out, needle) {
+  return out.split('\n').filter((line) => line.startsWith('  - ') && line.includes(needle))
+}
+
+const BOTH_DARWIN = {
+  'darwin-arm64/nanoepoch.node': machO(CPU_TYPE.arm64),
+  'darwin-x64/nanoepoch.node': machO(CPU_TYPE.x64)
+}
+
+test('well-formed Mach-O headers draw no complaint', () => {
+  const { out } = run(darwinTree(BOTH_DARWIN))
+  assert.deepEqual(faults(out, 'darwin'), [], out)
+})
+
+test('an x86_64 binary hiding under the arm64 name is refused', () => {
+  const root = darwinTree({ ...BOTH_DARWIN, 'darwin-arm64/nanoepoch.node': machO(CPU_TYPE.x64) })
+  const { status, out } = run(root)
+  assert.equal(status, 1)
+  assert.match(out, /architecture mismatch: prebuilds\/darwin-arm64\/nanoepoch\.node is cputype 0x1000007, but darwin-arm64 requires 0x100000c/)
+})
+
+test('an arm64 binary hiding under the x64 name is refused', () => {
+  const root = darwinTree({ ...BOTH_DARWIN, 'darwin-x64/nanoepoch.node': machO(CPU_TYPE.arm64) })
+  const { status, out } = run(root)
+  assert.equal(status, 1)
+  assert.match(out, /architecture mismatch: prebuilds\/darwin-x64\/nanoepoch\.node is cputype 0x100000c/)
+})
+
+test('garbage bytes under a macOS binary name are refused as not Mach-O', () => {
+  const root = darwinTree({ ...BOTH_DARWIN, 'darwin-x64/nanoepoch.node': 'x'.repeat(8192) })
+  const { status, out } = run(root)
+  assert.equal(status, 1)
+  assert.match(out, /not a Mach-O file: prebuilds\/darwin-x64\/nanoepoch\.node/)
+})
+
+test('a universal binary is named as one rather than called corrupt', () => {
+  // A stray `lipo` is the plausible mistake here, and its output IS Mach-O.
+  // Reporting it as garbage would send the release engineer looking for a
+  // broken compile instead of the build step that fattened the binary.
+  const root = darwinTree({ ...BOTH_DARWIN, 'darwin-arm64/nanoepoch.node': machO(CPU_TYPE.arm64, FAT_MAGIC) })
+  const { status, out } = run(root)
+  assert.equal(status, 1)
+  assert.match(out, /universal \(fat\) binary: prebuilds\/darwin-arm64\/nanoepoch\.node/)
+})
+
+// Resolving npm's own entry point instead of spawning `npm`: on Windows that
+// name is a .cmd, which cannot be spawned without a shell, and passing an args
+// array through a shell is what DEP0190 warns about.
+function npmCli () {
+  const candidates = []
+  if (process.env.npm_execpath?.endsWith('.js')) candidates.push(process.env.npm_execpath)
+  const nodeDirectory = dirname(process.execPath)
+  candidates.push(join(nodeDirectory, 'node_modules', 'npm', 'bin', 'npm-cli.js'))
+  candidates.push(join(nodeDirectory, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'))
+  return candidates.find((candidate) => existsSync(candidate)) ?? null
+}
+
+const cli = npmCli()
+
+// The half of "nothing runs at install time" that no manifest check can see.
+// npm compiles an installed package whose tarball root holds a binding.gyp even
+// when the package declares no install script at all, so what has to be
+// asserted is the file list npm actually produces -- npm decides that list, and
+// "files" is only one of its inputs.
+test('the tarball carries nothing npm would run at install time', {
+  skip: cli ? false : 'could not locate npm-cli.js to pack with'
+}, () => {
+  const result = spawnSync(process.execPath, [cli, 'pack', '--dry-run', '--json'], {
+    cwd: packageRoot,
+    encoding: 'utf8',
+    timeout: 120_000
+  })
+  assert.equal(result.status, 0, result.stderr)
+
+  const files = JSON.parse(result.stdout)[0].files.map((entry) => entry.path)
+  assert.ok(files.includes('index.js'), `the packed listing looks wrong: ${files.join(', ')}`)
+  assert.ok(!files.includes('binding.gyp'),
+    'a shipped binding.gyp is an implicit `node-gyp rebuild` on every install, with no script to point at')
+  assert.deepEqual(files.filter((file) => file.startsWith('scripts/')), [],
+    'nothing under scripts/ is meant to reach a consumer')
 })

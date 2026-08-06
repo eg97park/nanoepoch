@@ -16,7 +16,9 @@ const PREBUILD_TARGETS = [
   { target: 'win32-x64', libc: '' },
   { target: 'win32-arm64', libc: '' },
   { target: 'linux-x64', libc: ' (glibc and musl)' },
-  { target: 'linux-arm64', libc: ' (glibc and musl)' }
+  { target: 'linux-arm64', libc: ' (glibc and musl)' },
+  { target: 'darwin-arm64', libc: '' },
+  { target: 'darwin-x64', libc: '' }
 ]
 
 // Which prebuilt filenames could serve this process, most likely first.
@@ -197,12 +199,17 @@ function loadErrorMessage (attempts) {
     '       npm install nanoepoch --force',
     '  2. On Linux, if the libc above looks wrong, override the detection:',
     '       LIBC=glibc  (or)  LIBC=musl',
-    '  3. Build from source (needs a C toolchain):',
+    '  3. Build it yourself (needs a C toolchain). The published tarball carries',
+    '     no binding.gyp, so nothing compiles at install time and npm rebuild has',
+    '     nothing to run -- build from a clone instead:',
     '       Debian/Ubuntu : apt-get install -y build-essential python3',
     '       Alpine        : apk add build-base python3',
+    '       macOS         : xcode-select --install',
     '       Windows       : Visual Studio Build Tools, "Desktop development with C++"',
     '                       (Visual Studio 2026 also requires node-gyp >= 12.1)',
-    '     then: npm rebuild nanoepoch',
+    '     then: git clone https://github.com/eg97park/nanoepoch',
+    '           cd nanoepoch && npm install && npm run build',
+    '           npm install /path/to/nanoepoch   (from your own project)',
     '  4. Still stuck? Report it with the block above:',
     '       https://github.com/eg97park/nanoepoch/issues/new'
   ]

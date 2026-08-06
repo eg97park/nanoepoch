@@ -5,10 +5,14 @@
 //
 // Beyond the file list, every binary's header is checked against the directory
 // and libc tag its filename claims. The per-platform verify jobs test each
-// artifact before the publish job merges four of them into one tree, so the
+// artifact before the publish job merges six of them into one tree, so the
 // merge itself is the one step nothing else watches: a path collision there
 // would overwrite a good binary with one for the wrong architecture while
 // keeping the right filename. Sixteen bytes of header reading closes that.
+//
+// The manifest is checked for the same reason: nothing this package ships may
+// run on a consumer's machine at install time, and the way that promise breaks
+// is silent (see the "files" check below).
 //
 // Usage: node scripts/verify-prebuilds.mjs [--expect-version <version>] [--root <dir>]
 
@@ -39,15 +43,19 @@ const EXPECTED = [
   'linux-x64/nanoepoch.glibc.node',
   'linux-x64/nanoepoch.musl.node',
   'linux-arm64/nanoepoch.glibc.node',
-  'linux-arm64/nanoepoch.musl.node'
+  'linux-arm64/nanoepoch.musl.node',
+  'darwin-arm64/nanoepoch.node',
+  'darwin-x64/nanoepoch.node'
 ]
 
-// IMAGE_FILE_MACHINE_* for PE, e_machine for ELF.
+// IMAGE_FILE_MACHINE_* for PE, e_machine for ELF, cputype for Mach-O.
 const MACHINE = {
   'win32-x64': 0x8664,
   'win32-arm64': 0xAA64,
   'linux-x64': 62, // EM_X86_64
-  'linux-arm64': 183 // EM_AARCH64
+  'linux-arm64': 183, // EM_AARCH64
+  'darwin-x64': 0x01000007, // CPU_TYPE_X86 | CPU_ARCH_ABI64
+  'darwin-arm64': 0x0100000C // CPU_TYPE_ARM | CPU_ARCH_ABI64
 }
 
 const problems = []
@@ -121,6 +129,30 @@ function checkContents (relative) {
     return
   }
 
+  if (directory.startsWith('darwin-')) {
+    // Mach-O: MH_MAGIC_64, then cputype. Both are stored little-endian on the
+    // two architectures this ships for, so one read order covers both.
+    const magic = data.length >= 8 ? data.readUInt32LE(0) : 0
+    // A universal binary IS Mach-O, so reporting "not a Mach-O file" would send
+    // the reader hunting for a corrupt build instead of the stray `lipo` that
+    // actually produced it. The loader would accept one, but a fat file doubles
+    // every macOS install to ship an architecture the directory already names.
+    if (magic === 0xCAFEBABE || magic === 0xBEBAFECA) {
+      problems.push(`universal (fat) binary: prebuilds/${relative}; each directory ships exactly one architecture`)
+      return
+    }
+    if (magic !== 0xFEEDFACF) {
+      problems.push(`not a Mach-O file: prebuilds/${relative}`)
+      return
+    }
+    const cpuType = data.readUInt32LE(4)
+    if (cpuType !== expectedMachine) {
+      problems.push(`architecture mismatch: prebuilds/${relative} is cputype 0x${cpuType.toString(16)}, ` +
+        `but ${directory} requires 0x${expectedMachine.toString(16)}`)
+    }
+    return
+  }
+
   // ELF: magic, then e_machine at offset 18.
   if (data.length < 20 || data.readUInt32BE(0) !== 0x7F454C46) {
     problems.push(`not an ELF file: prebuilds/${relative}`)
@@ -170,6 +202,28 @@ for (const relative of found.keys()) {
 const repositoryUrl = typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url
 if (!repositoryUrl || repositoryUrl.includes('CHANGEME')) {
   problems.push(`package.json repository is still a placeholder: ${repositoryUrl}`)
+}
+
+// Nothing in the tarball may execute on a consumer's machine, and the way that
+// promise breaks is invisible: npm treats a binding.gyp in the root of an
+// installed package as an implicit `node-gyp rebuild` whenever the package
+// declares no install or preinstall of its own. Putting binding.gyp back into
+// "files" would therefore reinstate install-time compilation with no script
+// anywhere to point at. It stays in the REPOSITORY, where that same rule is
+// what builds the addon for contributors -- it just must not be shipped.
+for (const stage of ['preinstall', 'install', 'postinstall']) {
+  const script = pkg.scripts?.[stage]
+  if (script) {
+    problems.push(`package.json declares a lifecycle script that runs on every consumer's machine (${stage}): ${script}`)
+  }
+}
+for (const entry of Array.isArray(pkg.files) ? pkg.files : []) {
+  const normalised = entry.replace(/^\.\//, '')
+  if (normalised === 'binding.gyp') {
+    problems.push('package.json "files" ships binding.gyp, which npm runs as an implicit node-gyp rebuild at install time')
+  } else if (normalised === 'scripts' || normalised.startsWith('scripts/')) {
+    problems.push(`package.json "files" ships ${entry}; nothing under scripts/ is meant to reach a consumer`)
+  }
 }
 
 const expectVersionIndex = process.argv.indexOf('--expect-version')

@@ -48,9 +48,14 @@ npm install nanoepoch
 ```
 
 Prebuilt binaries ship inside the npm tarball for every supported platform, so
-no compiler, Python, or `node-gyp` is required. Nothing is downloaded at install
-time, which means it also works offline, behind a firewall, and with
-`--ignore-scripts`.
+no compiler, Python, or `node-gyp` is required.
+
+**Nothing runs at install time.** There is no install, preinstall, or
+postinstall script, and the tarball deliberately ships no `binding.gyp` — npm
+compiles a package that carries one even when it declares no script at all.
+Nothing is downloaded, nothing is compiled, and nothing is executed; the right
+binary is selected when you `require` the package. That is what makes this work
+offline, behind a firewall, and under `--ignore-scripts`.
 
 ## Usage
 
@@ -174,12 +179,14 @@ time nor a real duration.
 
 Prebuilt binaries ship for:
 
-| Platform | libc |
+| Platform | libc / OS floor |
 |---|---|
 | `win32-x64` | — |
 | `win32-arm64` | — |
 | `linux-x64` | glibc 2.28+ and musl |
 | `linux-arm64` | glibc 2.28+ and musl |
+| `darwin-arm64` | macOS 13.5+ |
+| `darwin-x64` | macOS 13.5+ |
 
 The glibc builds target glibc 2.28, which is the same floor the official Node.js
 Linux binaries require — so any machine that can run a supported Node can load
@@ -188,18 +195,19 @@ require time: it guesses cheaply, and if the guess is wrong the other candidate
 is tried, so a mislabelled container cannot leave you without a binary. Force
 the choice with `LIBC=glibc` or `LIBC=musl` to skip the guess entirely.
 
+The macOS builds compile against the Node 24 headers, whose deployment target is
+macOS 13.5 (`MACOSX_DEPLOYMENT_TARGET` in Node's `common.gypi`) — the same floor
+Node 24 itself requires. `darwin-x64` is built on GitHub's Intel macOS image,
+which is the last one they will offer; that row lives as long as the image does.
+
 Tested against Node 22, 24, and 26. `engines` allows Node 20, which is past end
 of life but still widely deployed; it gets a smoke test in CI rather than the
 full matrix.
 
-macOS is not in the prebuild matrix. The POSIX code path compiles and runs there
-unchanged, so `npm install` builds from source if Xcode Command Line Tools are
-present — but on a Mac without a toolchain the install will fail. That source
-build is the one thing here that depends on an install script running, and npm
-is steadily tightening its stance on those (npm 11 already warns), so treat
-macOS as best-effort rather than supported. The prebuilt platforms are
-unaffected: their binaries are resolved when you `require` the package, not when
-you install it, which is why `--ignore-scripts` installs work.
+Anything outside this table has no automatic fallback: with no install script
+and no `binding.gyp` in the tarball, an unsupported platform fails loudly at
+`require` time instead of quietly compiling. Building from a clone still works —
+see [Development](#development) — and the load error spells out the steps.
 
 ### There is no JavaScript fallback
 
@@ -215,9 +223,21 @@ you have been recording wrong timestamps for hours without any indication. A
 loud failure at deploy time is strictly better than silent data corruption in
 production.
 
-If you would rather not run a binary someone else compiled, `npm install
-nanoepoch --build-from-source` ignores the prebuilds and compiles
-[`src/nanoepoch.c`](src/nanoepoch.c) — about 400 lines — with your own toolchain.
+If you would rather not run a binary someone else compiled, build it yourself.
+`--build-from-source` no longer applies — it works by re-running an install
+script, and this package has none — so compile from a clone and point your
+project at the checkout:
+
+```sh
+git clone https://github.com/eg97park/nanoepoch
+cd nanoepoch && npm install && npm run build
+cd /path/to/your/project && npm install /path/to/nanoepoch
+```
+
+What compiles is [`src/nanoepoch.c`](src/nanoepoch.c), about 400 lines. It also
+ships inside the npm tarball so you can read the source the shipped binary was
+built from, even though the tarball leaves out the `binding.gyp` that would let
+you compile it in place.
 
 ## Performance
 
@@ -253,8 +273,11 @@ else should be auditable in one sitting, so:
 
 - **Zero runtime dependencies.** Resolving which prebuilt binary to load is
   about sixty lines at the top of [`index.js`](index.js), not a dependency.
-  The install script ([`scripts/install.js`](scripts/install.js)) spawns
-  node-gyp and nothing else.
+- **Nothing executes at install time.** No install, preinstall, or postinstall
+  script, and no `binding.gyp` in the tarball — npm builds a package that ships
+  one even when it declares no script at all, so leaving it out is the half of
+  this that is easy to get wrong. `binding.gyp` stays in the repository, where
+  that same rule is what builds the addon for contributors.
 - **The binaries ship inside the tarball**, so npm provenance covers them —
   they are built by the public [release workflow](.github/workflows/release.yml)
   on GitHub-hosted runners, and the attestation ties the tarball to the exact
@@ -267,21 +290,31 @@ else should be auditable in one sitting, so:
 - **Publishing uses OIDC trusted publishing** — no long-lived npm token exists
   to leak. The workflow pins every GitHub Action to a full commit SHA, and the
   release gate ([`scripts/verify-prebuilds.mjs`](scripts/verify-prebuilds.mjs))
-  reads each binary's ELF/PE header before publish, refusing a release where
-  any binary's architecture or libc disagrees with its filename.
-- **You can opt out of the binaries entirely**: `npm install nanoepoch
-  --build-from-source` compiles the ~400 lines of C with your own toolchain.
+  reads each binary's ELF, PE, or Mach-O header before publish, refusing a
+  release where any binary's architecture or libc disagrees with its filename —
+  or where the manifest has grown an install script or a shipped `binding.gyp`.
+- **You can opt out of the binaries entirely** by compiling the ~400 lines of C
+  yourself; the steps are under [There is no JavaScript
+  fallback](#there-is-no-javascript-fallback).
 
 ## Development
 
 ```sh
-npm install            # builds the addon from source
+npm install            # devDependencies, plus a source build (see below)
+npm run build          # the explicit build; rerun after editing src/nanoepoch.c
 npm test               # the full suite
-npm run build          # rebuild the addon after editing src/nanoepoch.c
 npm run bench          # the table above
 npm run make-prebuild  # a prebuilt binary for the current platform
 npm run attw           # check the published type declarations resolve
 ```
+
+`binding.gyp` is in the repository but not in the npm tarball, so a checkout
+still compiles on `npm install` — through npm's implicit `node-gyp rebuild` —
+while a consumer's install compiles nothing. That implicit path uses whichever
+node-gyp npm bundles, which is 10.x on the Node 22 line and cannot detect Visual
+Studio 2026, so CI installs with `--ignore-scripts` and calls `npm run build`
+explicitly: that one runs the `node-gyp` devDependency pinned to ^13. Do the
+same locally if a build picks the wrong toolchain.
 
 Building from source needs Node 22.22 or newer — the `node-gyp` devDependency
 supports `^22.22.2 || ^24.15.0 || >=26`. Consumers are unaffected: the
