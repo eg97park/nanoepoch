@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -254,4 +254,43 @@ test('the tarball carries nothing npm would run at install time', {
     'a shipped binding.gyp is an implicit `node-gyp rebuild` on every install, with no script to point at')
   assert.deepEqual(files.filter((file) => file.startsWith('scripts/')), [],
     'nothing under scripts/ is meant to reach a consumer')
+})
+
+// 0.3.0 kept binding.gyp out of the tarball and still broke every install.
+// npm does not publish the manifest as written: it prepares one from the
+// PUBLISH DIRECTORY, which is this repository, and that preparation sets
+// gypfile: true plus scripts.install = "node-gyp rebuild" whenever a
+// binding.gyp is present and no install script is declared. The tarball then
+// has no binding.gyp for node-gyp to find, so the install dies at
+// "gyp: binding.gyp not found". Only "gypfile": false turns that off.
+//
+// The tarball assertion above cannot see this -- the injected script never
+// reaches the tarball, only the registry -- so the manifest gets its own test.
+test('the manifest disables npm\'s implicit gyp install while binding.gyp is in the repository', {
+  skip: existsSync(join(packageRoot, 'binding.gyp')) ? false : 'no binding.gyp, so nothing can be injected'
+}, () => {
+  const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+  assert.equal(pkg.gypfile, false,
+    'without "gypfile": false npm publishes an install script this package cannot satisfy')
+})
+
+test('the release gate refuses a manifest that forgot "gypfile": false', () => {
+  const root = mkdtempSync(join(tmpdir(), 'nanoepoch-gypfile-'))
+  fixtures.push(root)
+  mkdirSync(join(root, 'scripts'))
+  copyFileSync(script, join(root, 'scripts', 'verify-prebuilds.mjs'))
+  copyFileSync(join(packageRoot, 'binding.gyp'), join(root, 'binding.gyp'))
+
+  const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+  delete pkg.gypfile
+  writeFileSync(join(root, 'package.json'), JSON.stringify(pkg, null, 2))
+
+  // --root points at an empty tree, so the prebuild checks fail too. That is
+  // fine: what is asserted is that the manifest fault is reported by name.
+  const empty = mkdtempSync(join(tmpdir(), 'nanoepoch-empty-'))
+  fixtures.push(empty)
+  const result = spawnSync(process.execPath, [join(root, 'scripts', 'verify-prebuilds.mjs'), '--root', empty], { encoding: 'utf8' })
+  const out = result.stdout + result.stderr
+  assert.equal(result.status, 1)
+  assert.match(out, /package\.json must set "gypfile": false while binding\.gyp is in the repository/)
 })

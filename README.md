@@ -274,10 +274,16 @@ else should be auditable in one sitting, so:
 - **Zero runtime dependencies.** Resolving which prebuilt binary to load is
   about sixty lines at the top of [`index.js`](index.js), not a dependency.
 - **Nothing executes at install time.** No install, preinstall, or postinstall
-  script, and no `binding.gyp` in the tarball — npm builds a package that ships
-  one even when it declares no script at all, so leaving it out is the half of
-  this that is easy to get wrong. `binding.gyp` stays in the repository, where
-  that same rule is what builds the addon for contributors.
+  script; no `binding.gyp` in the tarball, because npm builds a package that
+  ships one even when it declares no script at all; and `"gypfile": false` in
+  the manifest, because npm otherwise *writes that install script itself* into
+  the manifest it uploads — it prepares that manifest from the publish
+  directory, and this repository does keep a `binding.gyp` (that is what builds
+  the addon for contributors). 0.3.0 got the first two right, missed the third,
+  and every install of it failed; 0.3.1 is the fix. The release gate
+  ([`scripts/verify-prebuilds.mjs`](scripts/verify-prebuilds.mjs)) now refuses a
+  manifest that has lost any of the three, and the release workflow re-reads the
+  published manifest from the registry afterwards.
 - **The binaries ship inside the tarball**, so npm provenance covers them —
   they are built by the public [release workflow](.github/workflows/release.yml)
   on GitHub-hosted runners, and the attestation ties the tarball to the exact

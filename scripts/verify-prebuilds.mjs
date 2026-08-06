@@ -16,7 +16,7 @@
 //
 // Usage: node scripts/verify-prebuilds.mjs [--expect-version <version>] [--root <dir>]
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
@@ -217,6 +217,22 @@ for (const stage of ['preinstall', 'install', 'postinstall']) {
     problems.push(`package.json declares a lifecycle script that runs on every consumer's machine (${stage}): ${script}`)
   }
 }
+// The half that 0.3.0 got wrong, and the reason 0.3.1 exists. Keeping
+// binding.gyp out of "files" keeps it out of the TARBALL, but npm builds the
+// manifest it uploads to the registry by running its own preparation over the
+// PUBLISH DIRECTORY -- which is this repository, binding.gyp and all. That step
+// sets gypfile: true and scripts.install = "node-gyp rebuild" on the published
+// manifest whenever no install script is declared, so npm then runs node-gyp
+// against a tarball that has no binding.gyp in it and every install fails.
+// Declaring gypfile: false is what turns that preparation step off; verified
+// against npm 11 and npm 12. The check is written against the file on disk
+// rather than a constant so it disappears by itself if binding.gyp ever leaves
+// the repository.
+if (existsSync(join(packageRoot, 'binding.gyp')) && pkg.gypfile !== false) {
+  problems.push('package.json must set "gypfile": false while binding.gyp is in the repository, ' +
+    'or npm publishes a manifest with an implicit "install": "node-gyp rebuild" that the tarball cannot satisfy')
+}
+
 for (const entry of Array.isArray(pkg.files) ? pkg.files : []) {
   const normalised = entry.replace(/^\.\//, '')
   if (normalised === 'binding.gyp') {

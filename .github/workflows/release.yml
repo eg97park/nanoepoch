@@ -424,6 +424,35 @@ jobs:
           fi
           echo "no binding.gyp and no scripts/ in the tarball"
       - run: npm publish
+      # 0.3.0 shipped a clean tarball behind a manifest npm had rewritten. npm
+      # prepares the manifest it uploads from the PUBLISH DIRECTORY, which is
+      # this checkout, binding.gyp included -- and that step sets gypfile: true
+      # plus an implicit "install": "node-gyp rebuild" unless the manifest says
+      # "gypfile": false. Every install then ran node-gyp against a tarball with
+      # no binding.gyp in it and died. Nothing in the tarball shows this, so the
+      # registry is asked directly. It cannot unpublish, but it turns a silent
+      # breakage into a red release instead of a bug report.
+      - name: Confirm the published manifest runs nothing at install time
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSL "https://registry.npmjs.org/nanoepoch/$version" -o /tmp/manifest.json; then break; fi
+            echo "manifest not visible yet (attempt $attempt)"
+            sleep 10
+          done
+          node -e '
+            const manifest = require("/tmp/manifest.json")
+            const scripts = manifest.scripts || {}
+            const lifecycle = ["preinstall", "install", "postinstall"].filter((name) => scripts[name])
+            if (lifecycle.length > 0 || manifest.gypfile || manifest.hasInstallScript) {
+              console.error("the PUBLISHED manifest executes code at install time:")
+              console.error("  gypfile          : " + manifest.gypfile)
+              console.error("  hasInstallScript : " + manifest.hasInstallScript)
+              console.error("  scripts          : " + JSON.stringify(scripts))
+              process.exit(1)
+            }
+            console.log("published manifest is clean: " + JSON.stringify(scripts))
+          '
 
   # Mirrors the npm release on the repository's Releases tab. A separate job so
   # that contents: write never sits in the same job as id-token: write -- a
