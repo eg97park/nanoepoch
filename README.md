@@ -349,9 +349,13 @@ else should be auditable in one sitting, so:
 
 - **Zero npm dependencies.** Resolving which prebuilt binary to load is about
   sixty lines at the top of [`index.js`](index.js), not a dependency. At the OS
-  level both Linux builds link `libc` and nothing else — the release gate
-  compares the binaries' `DT_NEEDED` entries against an exact list, so that
-  stays true or the release stops.
+  level the Linux builds link `libc` and nothing else, with one exception you
+  will see if you run `readelf -d` yourself: the aarch64 glibc binary also names
+  `ld-linux-aarch64.so.1`. That is the dynamic loader — the program that reads
+  `DT_NEEDED` in the first place, already mapped before it does — and aarch64
+  glibc records it where x86-64 does not. The release gate compares every
+  binary's `DT_NEEDED` against an exact list, that loader being the single
+  tolerated name, so this stays true or the release stops.
 - **Nothing executes at install time.** No install, preinstall, or postinstall
   script; no `*.gyp` at the tarball root, because npm builds a package that
   ships one even when it declares no script at all; and `"gypfile": false` in

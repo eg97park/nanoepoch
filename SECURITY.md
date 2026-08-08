@@ -7,10 +7,15 @@ branches while the package is pre-1.0.
 
 | Version | Status |
 |---|---|
-| `0.3.1` | Supported |
+| `0.4.0` | Supported |
+| `0.3.1` | Superseded — installs and runs correctly, but its binaries predate the hardening flags and the gate that checks them |
 | `0.3.0` | Deprecated — the published manifest declared an implicit `node-gyp rebuild` the tarball could not satisfy, so every install failed |
 | `0.2.x` | Deprecated — ran an install script |
 | `0.1.0` | Deprecated — no prebuilt binaries |
+
+Superseded is not deprecated. A version is deprecated on npm only when installing
+it is a mistake — it is broken, or it runs something it should not. A working
+older release is left alone.
 
 Node.js version support is a separate axis and lives in the README's
 [Support table](README.md#support).
@@ -73,7 +78,7 @@ Every one of these is checkable from outside:
   republishing a version, so withdrawing one only removes the fix. The broken
   version is deprecated by hand and the next patch supersedes it.
 
-## Three things this package must never do
+## Four things this package must never do
 
 Recorded here because each one is an easy, plausible change that would quietly
 break a promise the package is built on.
@@ -93,3 +98,12 @@ break a promise the package is built on.
    bundled binaries, and the way out — with npm's `EBADPLATFORM`, at install
    time, with none of that detail. Failing loudly and informatively at `require`
    is the design.
+4. **Never print to stdout from anything npm runs as a lifecycle script.**
+   `prepublishOnly` runs [`scripts/verify-prebuilds.mjs`](scripts/verify-prebuilds.mjs),
+   and npm's `--json` modes use stdout as a data channel: `npm publish --dry-run
+   --json > file` puts whatever a lifecycle script printed at the *top* of that
+   file, ahead of the JSON. The release parses exactly that file to confirm npm
+   is not about to upload a manifest carrying an install script — so a success
+   message on stdout breaks the check that reads it. Report through stderr;
+   [`test/release-guard.test.mjs`](test/release-guard.test.mjs) asserts the gate
+   contains no `console.log` at all.
