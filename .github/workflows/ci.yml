@@ -94,6 +94,9 @@ jobs:
   test-musl:
     name: test linux-x64-musl / node ${{ matrix.node }}
     runs-on: ubuntu-latest
+    # The only pull in either workflow that scripts/docker-pull.sh cannot cover:
+    # the runner fetches a `container:` image before the first step runs, so
+    # there is nowhere to put a retry. A registry flake here is a re-run.
     container: node:${{ matrix.node }}-alpine
     strategy:
       fail-fast: false
@@ -118,6 +121,7 @@ jobs:
       # checkout fail inside an arm64 Alpine container.
       - name: Build and test in Alpine
         run: |
+          sh scripts/docker-pull.sh node:24-alpine
           docker run --rm -v "$PWD:/work" -w /work node:24-alpine sh -c '
             apk add --no-cache build-base python3 &&
             npm ci --ignore-scripts --no-audit --no-fund &&
@@ -153,11 +157,13 @@ jobs:
       # require, so anything that can run a supported Node can load this.
       - name: Build the glibc prebuild
         run: |
+          sh scripts/docker-pull.sh quay.io/pypa/manylinux_2_28_x86_64
           docker run --rm -v "$PWD:/work" -w /work \
             -e NODE_VERSION="$BUILD_NODE_VERSION" \
             quay.io/pypa/manylinux_2_28_x86_64 bash scripts/build-prebuild.sh
       - name: Build the musl prebuild
         run: |
+          sh scripts/docker-pull.sh node:24-alpine
           docker run --rm -v "$PWD:/work" -w /work \
             node:24-alpine sh scripts/build-prebuild.sh
       - name: Show what was produced
@@ -206,6 +212,7 @@ jobs:
           tar tzf /tmp/nanoepoch.tgz | sort
       - name: Install and use it with no compiler present
         run: |
+          sh scripts/docker-pull.sh "${{ matrix.image }}"
           docker run --rm -v /tmp/nanoepoch.tgz:/tmp/nanoepoch.tgz ${{ matrix.image }} sh -c '
             set -e
 
@@ -281,6 +288,7 @@ jobs:
       # would not: it ships glibc 2.31.
       - name: Load the prebuilt binary on AlmaLinux 8
         run: |
+          sh scripts/docker-pull.sh almalinux:8
           docker run --rm -v "$PWD:/work" -w /work \
             -e NODE_VERSION="$BUILD_NODE_VERSION" almalinux:8 bash -c '
             set -e

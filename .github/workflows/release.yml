@@ -195,7 +195,7 @@ jobs:
       # it into the tarball for anyone who wants to try.
       - name: Build the glibc prebuild (glibc 2.28 floor)
         run: |
-          docker pull "${{ matrix.manylinux }}"
+          sh scripts/docker-pull.sh "${{ matrix.manylinux }}"
           digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${{ matrix.manylinux }}")
           echo "building in $digest"
           docker run --rm -v "$PWD:/work" -w /work \
@@ -204,7 +204,7 @@ jobs:
             ${{ matrix.manylinux }} bash scripts/build-prebuild.sh
       - name: Build the musl prebuild
         run: |
-          docker pull node:24-alpine
+          sh scripts/docker-pull.sh node:24-alpine
           digest=$(docker inspect --format='{{index .RepoDigests 0}}' node:24-alpine)
           echo "building in $digest"
           docker run --rm -v "$PWD:/work" -w /work \
@@ -272,6 +272,7 @@ jobs:
           path: prebuilds/
       - name: Run the suite against the shipped musl binary
         run: |
+          sh scripts/docker-pull.sh node:24-alpine
           docker run --rm -v "$PWD:/work" -w /work node:24-alpine sh -c '
             set -e
             # Zero runtime dependencies and builtin-only tests: no install.
@@ -293,6 +294,7 @@ jobs:
       # floor itself rather than something merely older than the runner.
       - name: Load the shipped binary on glibc 2.28
         run: |
+          sh scripts/docker-pull.sh almalinux:8
           docker run --rm -v "$PWD:/work" -w /work \
             -e NODE_VERSION="$BUILD_NODE_VERSION" almalinux:8 bash -c '
             set -e
@@ -348,6 +350,7 @@ jobs:
         run: |
           for image in node:22-alpine node:24-alpine node:26-alpine node:22-slim node:24-slim; do
             echo "=== $image ==="
+            sh scripts/docker-pull.sh "$image"
             docker run --rm -v /tmp/nanoepoch.tgz:/tmp/nanoepoch.tgz "$image" sh -c '
               set -e
               for tool in gcc g++ cc make python3 node-gyp; do
@@ -773,6 +776,18 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           for image in node:22-slim node:24-slim node:26-slim node:22-alpine node:24-alpine node:26-alpine; do
             echo "=== $image ==="
+            # The one pull that cannot use scripts/docker-pull.sh: this job
+            # deliberately never checks the repository out, because it is
+            # standing in for a consumer who has only the registry. Same three
+            # attempts, written out.
+            for attempt in 1 2 3; do
+              docker pull "$image" && break
+              if [ "$attempt" = 3 ]; then
+                echo "giving up pulling $image"
+                exit 1
+              fi
+              sleep $((attempt * 15))
+            done
             # docker run, never a container job: the runner cannot inject a
             # musl Node, so JavaScript actions fail inside arm64 Alpine.
             docker run --rm -e VERSION="$version" "$image" sh -c '
