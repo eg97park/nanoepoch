@@ -1,10 +1,15 @@
-# These scripts are executed inside Linux containers by CI. Checked out with
-# CRLF on a Windows machine they fail with "bad interpreter: no such file or
+# Every text file is LF, in the repository and in the working tree, on every
+# platform -- eol=lf rather than plain text=auto, because a contributor with
+# core.autocrlf=true would otherwise check out CRLF and `npm pack` reads the
+# WORKING TREE. The release records a SHA-256 for each shipped file, and
+# BUILD-INFO.json ties src/nanoepoch.c to the binaries compiled from it, so a
+# file that is CRLF here and LF on a Linux runner hashes differently in the two
+# places and fails a gate for a reason that has nothing to do with its contents.
+#
+# It also keeps the shell scripts working: checked out with CRLF they fail
+# inside the Linux build containers with "bad interpreter: no such file or
 # directory", which is a confusing way to learn about line endings.
-*.sh text eol=lf
-
-# Read by Linux runners.
-*.yml text eol=lf
+* text=auto eol=lf
 
 # Compiled addons must never be line-ending converted.
 *.node binary
