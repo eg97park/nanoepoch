@@ -1,6 +1,6 @@
 {
   "name": "nanoepoch",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Nanosecond Unix-epoch timestamps read fresh from the OS realtime clock on every call, returned as a BigInt.",
   "type": "commonjs",
   "main": "./index.js",
