@@ -55,14 +55,15 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-      # Install and build are two steps on purpose. The repository still holds a
-      # binding.gyp -- it is only kept out of the tarball -- so a bare
-      # `npm install` would compile through npm's IMPLICIT node-gyp invocation,
-      # which uses whichever node-gyp npm bundles (10.x on the Node 22 line, and
-      # that one cannot detect Visual Studio 2026). Installing with scripts off
-      # and running `npm run build` puts the pinned ^13 devDependency back in
-      # charge, which is what the check below then measures.
-      - run: npm install --ignore-scripts
+      # Install and build are two steps on purpose. `"gypfile": false` already
+      # stops npm from compiling this repository's binding.gyp implicitly, so
+      # the build has to be explicit anyway -- and being explicit is what puts
+      # the pinned node-gyp ^13 devDependency in charge rather than whichever
+      # version npm bundles (10.x on the Node 22 line, which cannot detect
+      # Visual Studio 2026). --ignore-scripts keeps that true even if the
+      # manifest ever loses `"gypfile": false`, which is the failure the release
+      # gate exists to catch.
+      - run: npm ci --ignore-scripts
       # windows-latest carries Visual Studio 2026 as of June 2026, and node-gyp
       # 12.0.x cannot detect it ("unknown version").
       - name: Check the node-gyp in use knows Visual Studio 2026
@@ -78,8 +79,17 @@ jobs:
               process.exit(1)
             }
           ' "$version"
-      - run: npm run build
+      - run: npm run dev:build
       - run: npm test
+      # Windows only. MSVC does not enable /guard:cf on its own -- node's
+      # config.gypi explicitly sets control_flow_guard to "false" -- so unlike
+      # the Linux runners, a local build here proves the binding.gyp flag really
+      # reached the compiler and the linker. The Linux equivalent runs against
+      # the container-built artifacts in prebuild-linux-x64.
+      - name: Control Flow Guard must survive the build
+        if: runner.os == 'Windows'
+        shell: bash
+        run: node scripts/check-hardening.mjs build/Release/nanoepoch.node --as win32-${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
   test-musl:
     name: test linux-x64-musl / node ${{ matrix.node }}
@@ -94,8 +104,8 @@ jobs:
       - run: apk add --no-cache build-base python3
       # Two steps for the same reason as the job above: build through the pinned
       # node-gyp devDependency, not through npm's implicit invocation.
-      - run: npm install --ignore-scripts
-      - run: npm run build
+      - run: npm ci --ignore-scripts
+      - run: npm run dev:build
       - run: npm test
 
   test-musl-arm64:
@@ -110,8 +120,8 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/work" -w /work node:24-alpine sh -c '
             apk add --no-cache build-base python3 &&
-            npm install --ignore-scripts --no-audit --no-fund &&
-            npm run build &&
+            npm ci --ignore-scripts --no-audit --no-fund &&
+            npm run dev:build &&
             npm test
           '
 
@@ -126,7 +136,7 @@ jobs:
       # attw packs the tarball and reads the declarations; nothing here needs a
       # compiled addon, so skip the build the repository's binding.gyp would
       # otherwise trigger.
-      - run: npm install --ignore-scripts
+      - run: npm ci --ignore-scripts
       # attw is fetched here rather than declared as a devDependency: it brings
       # 53 packages for a check that runs in exactly one job, and installing it
       # for every contributor and every other job is the larger cost. The
@@ -151,7 +161,19 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work \
             node:24-alpine sh scripts/build-prebuild.sh
       - name: Show what was produced
-        run: find prebuilds -type f -exec ls -l {} +
+        run: find prebuilds build-info -type f -exec ls -l {} +
+      # The hardening check belongs HERE and not on the test matrix. Ubuntu's
+      # GCC already applies -fstack-protector-strong and relro by default, and
+      # Alpine's adds BIND_NOW and a canary on top, so checking a local
+      # `npm run dev:build` on those runners would go green whether or not
+      # binding.gyp had any effect at all. These two are the real manylinux and
+      # Alpine artifacts -- the same containers the release builds in -- so a
+      # flag that stops taking is visible on the pull request that breaks it
+      # rather than on the tag.
+      - name: The shipped Linux binaries must be hardened as binding.gyp asks
+        run: |
+          node scripts/check-hardening.mjs prebuilds/linux-x64/nanoepoch.glibc.node --as linux-x64-glibc
+          node scripts/check-hardening.mjs prebuilds/linux-x64/nanoepoch.musl.node --as linux-x64-musl
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: prebuilds-linux-x64
@@ -219,6 +241,20 @@ jobs:
             npm install /tmp/nanoepoch.tgz --ignore-scripts --no-audit --no-fund
             node -e "console.log(\"ok, scripts ignored:\", require(\"nanoepoch\").now())"
 
+            # The package ships one test file so that `npm test` in an installed
+            # tree means something. Running it here is what turns the tarball
+            # from "it required without throwing" into "its own contract holds
+            # against the bytes that shipped". The pass-count grep is the point:
+            # `node --test` exits 0 when it finds no tests at all, which is the
+            # vacuous green this file exists to prevent.
+            echo "--- the shipped self-test ---"
+            cd node_modules/nanoepoch
+            npm test
+            node --test --test-reporter=tap test/smoke.test.mjs > /tmp/tap.txt 2>&1 || { cat /tmp/tap.txt; exit 1; }
+            grep -qE "^# pass [1-9][0-9]*\$" /tmp/tap.txt || { echo "FAILED: the shipped self-test ran no tests"; cat /tmp/tap.txt; exit 1; }
+            grep -qE "^# fail 0\$" /tmp/tap.txt || { echo "FAILED: the shipped self-test reported failures"; cat /tmp/tap.txt; exit 1; }
+            cd /app
+
             echo "--- negative control: no binary must mean a loud failure ---"
             rm -rf node_modules/nanoepoch/prebuilds node_modules/nanoepoch/build
             if node -e "require(\"nanoepoch\")" 2>/tmp/err; then
@@ -250,6 +286,8 @@ jobs:
             set -e
             ldd --version | head -1
             curl -fsSLO "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-x64.tar.xz"
+            curl -fsSLO "https://nodejs.org/dist/$NODE_VERSION/SHASUMS256.txt"
+            grep " node-$NODE_VERSION-linux-x64.tar.xz$" SHASUMS256.txt | sha256sum -c -
             mkdir -p /opt/node && tar xf node-*.tar.xz -C /opt/node --strip-components=1
             export PATH=/opt/node/bin:$PATH
             # No npm install: the package has zero runtime dependencies, so
@@ -266,10 +304,18 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm install --ignore-scripts
-      - run: npm run build
+      - run: npm ci --ignore-scripts
+      - run: npm run dev:build
       - name: Step the clock backwards and check who notices
         run: bash scripts/clock-step/run.sh
+      # The README quotes this benchmark's output and tells readers to run it.
+      # Nothing else executes it, so its mitata dependency would rot silently
+      # and the reproduction instruction would quietly become false. Non-gating:
+      # a shared runner's timing numbers are not something to fail a build over,
+      # only the fact that the script still runs.
+      - name: The benchmark the README quotes must still run
+        continue-on-error: true
+        run: npm run bench
 
   legacy-node-smoke:
     name: node 20 consumer smoke
@@ -308,6 +354,16 @@ jobs:
             nowInto(buffer)
             console.log("node 20 consumer path ok:", v, nowMicros(), buffer[0])
           '
+      # The only Node 20 job there is, so it is also the only place the shipped
+      # self-test is exercised on the engines floor -- where `node --test`'s
+      # file discovery is least like the version everything else runs.
+      - name: The shipped self-test runs on the engines floor
+        run: |
+          cd /tmp/consumer/node_modules/nanoepoch
+          npm test
+          node --test --test-reporter=tap test/smoke.test.mjs > /tmp/tap.txt 2>&1 || { cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# pass [1-9][0-9]*$' /tmp/tap.txt || { echo "the shipped self-test ran no tests"; cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# fail 0$' /tmp/tap.txt || { echo "the shipped self-test reported failures"; cat /tmp/tap.txt; exit 1; }
 
   runtime-smoke:
     name: ${{ matrix.runtime }} smoke (non-gating)
@@ -322,8 +378,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm install --ignore-scripts
-      - run: npm run build
+      - run: npm ci --ignore-scripts
+      - run: npm run dev:build
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: matrix.runtime == 'bun'
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
@@ -351,3 +407,60 @@ jobs:
               node -e 'console.log("electron", require("electron/package.json").version, "bundles Node", require("child_process").execFileSync(require("electron"), ["-e", "console.log(process.versions.node + \" ABI \" + process.versions.modules)"], {encoding: "utf8", env: {...process.env, ELECTRON_RUN_AS_NODE: "1"}}).trim())'
               ELECTRON_RUN_AS_NODE=1 "$(node -e 'process.stdout.write(require("electron"))')" -e "const { now, nowMicros, nowInto } = require('./index.js'); $snippet" ;;
           esac
+
+  # The single check the branch ruleset requires.
+  #
+  # Registering the expanded job names instead would mean registering 27 of
+  # them, and 24 carry a Node version or an image tag in the name: dropping the
+  # Node 22 row leaves five stale entries that never report, and a required
+  # check that never reports blocks every merge in the repository until an
+  # administrator edits the ruleset. Adding a Node 28 row has the opposite
+  # failure -- the new names are simply not required, so they gate nothing.
+  # Both land on the pull request doing the version bump. `needs:` refers to job
+  # ids, which version bumps do not touch.
+  #
+  # `if: always()` is load-bearing. Without it, a failed dependency SKIPS this
+  # job, and GitHub reports a skipped job to branch protection as a SUCCESS --
+  # the gate would go green exactly when CI is red. For the same reason the step
+  # below rejects every result that is not "success", not just "failure":
+  # install-proof, glibc-floor and legacy-node-smoke all sit behind
+  # `needs: prebuild-linux-x64`, so "skipped" is a state they really reach.
+  #
+  # runtime-smoke is deliberately absent: it is continue-on-error and must not
+  # block a merge. test/ci-required.test.mjs asserts that this list stays equal
+  # to "every job except that one", so a job added to CI cannot quietly end up
+  # ungated.
+  ci-required:
+    # This string is the ruleset entry. Renaming it removes the gate silently.
+    name: ci-required
+    if: always()
+    needs:
+      - test
+      - test-musl
+      - test-musl-arm64
+      - types
+      - prebuild-linux-x64
+      - install-proof
+      - glibc-floor
+      - clock-step
+      - legacy-node-smoke
+    # Pinned rather than ubuntu-latest: this job decides whether anything can
+    # merge, so it should be the last thing a runner image migration touches.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      # Only to read this repository's own code for the checkout below.
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Every required job must have succeeded
+        env:
+          # Through the environment rather than interpolated into the script: a
+          # job cannot ask GitHub for its own dependencies, so the workflow has
+          # to hand them over.
+          RESULTS: ${{ toJSON(needs) }}
+        # A script rather than an inline `node -e`, because this is the one
+        # check standing between a red CI and a merged pull request, and logic
+        # buried in YAML cannot be tested. test/ci-required.test.mjs exercises
+        # it against every result GitHub can report.
+        run: node scripts/ci-required.mjs

@@ -19,8 +19,73 @@ env:
   BUILD_NODE_VERSION: v24.19.0
 
 jobs:
+  # A tag is a pointer, and nothing about pushing one proves the commit under it
+  # was ever tested. This workflow re-runs six verification jobs of its own, but
+  # it never runs CI's type resolution, its source builds, its musl matrix, or
+  # Node 22 and 26 at all -- so without this job, `git tag v9.9.9 && git push
+  # --tags` on an untested commit publishes with none of that behind it.
+  preflight:
+    name: the tag must point at a tested commit on main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: The tagged commit must be on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "$GITHUB_SHA is not an ancestor of origin/main; releases come from main"
+            exit 1
+          fi
+          echo "$GITHUB_SHA is on main"
+      # Asked about the CI WORKFLOW's runs rather than about the commit's
+      # check-runs. The commit's list also holds this workflow's own jobs --
+      # including this one, which cannot be complete while it is doing the
+      # asking, and including any failed job from an earlier attempt at the same
+      # tag, which would make a re-run permanently unreleasable.
+      #
+      # Polled because a tag pushed together with its commit arrives before CI
+      # has finished, and often before it has started.
+      - name: CI must have passed for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in $(seq 1 30); do
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=20" > /tmp/ci.json
+            node -e '
+              const { workflow_runs: runs } = require("/tmp/ci.json")
+              if (runs.length === 0) {
+                console.log("no CI run for this commit yet")
+                process.exit(2)
+              }
+              // Newest first, and only the latest attempt of each run matters.
+              const latest = runs[0]
+              if (latest.status !== "completed") {
+                console.log("CI is " + latest.status + " (" + latest.html_url + ")")
+                process.exit(2)
+              }
+              if (latest.conclusion !== "success") {
+                console.error("CI concluded " + latest.conclusion + " for this commit: " + latest.html_url)
+                process.exit(1)
+              }
+              console.log("CI passed: " + latest.html_url)
+            '
+            status=$?
+            [ $status -eq 0 ] && exit 0
+            [ $status -eq 1 ] && exit 1
+            echo "waiting for CI (attempt $attempt)"
+            sleep 60
+          done
+          echo "CI never reported a conclusion for $GITHUB_SHA"
+          exit 1
+
   build-windows:
     name: prebuild ${{ matrix.label }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -35,7 +100,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm install --ignore-scripts
+      - run: npm ci --ignore-scripts
       # The script tags the filename with a libc only on Linux, so nothing to
       # pass here. Named make-prebuild because npm would treat a script called
       # "prebuild" as the implicit pre-hook of "build".
@@ -47,15 +112,24 @@ jobs:
         run: rm -rf build
       - name: Show what was produced
         shell: bash
-        run: find prebuilds -type f -exec ls -l {} +
+        run: find prebuilds build-info -type f -exec ls -l {} +
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: prebuilds-${{ matrix.label }}
           path: prebuilds/
           if-no-files-found: error
+      # A second artifact rather than a second path in the one above: the verify
+      # jobs download prebuilds-* straight into prebuilds/, which only works
+      # while that artifact's root IS the contents of prebuilds/.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: buildinfo-${{ matrix.label }}
+          path: build-info/
+          if-no-files-found: error
 
   build-macos:
     name: prebuild ${{ matrix.label }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -72,7 +146,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm install --ignore-scripts
+      - run: npm ci --ignore-scripts
       # The Node headers carry MACOSX_DEPLOYMENT_TARGET=13.5 (node/common.gypi),
       # so the binary's minimum OS follows the Node line these are built with,
       # not the runner's macOS version. That floor is in the README.
@@ -80,15 +154,27 @@ jobs:
       - name: Drop the intermediate build directory
         run: rm -rf build
       - name: Show what was produced
-        run: find prebuilds -type f -exec ls -l {} +
+        run: find prebuilds build-info -type f -exec ls -l {} +
+      # The only place a Mach-O binary is ever produced, so the only place its
+      # architecture, its minimum-OS load command, and its stack protector can
+      # be read at all. The minimum-OS check is a gate; the stack protector is
+      # reported here so a human can see it before it becomes one.
+      - name: Report what the macOS binary was built with
+        run: node scripts/check-hardening.mjs prebuilds/${{ matrix.label }}/nanoepoch.node --as ${{ matrix.label }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: prebuilds-${{ matrix.label }}
           path: prebuilds/
           if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: buildinfo-${{ matrix.label }}
+          path: build-info/
+          if-no-files-found: error
 
   build-linux:
     name: prebuild ${{ matrix.arch }} (glibc + musl)
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -102,21 +188,39 @@ jobs:
       # arm64 that is required -- the runner cannot inject a musl Node, so
       # JavaScript actions fail inside an Alpine container -- and using the same
       # shape for glibc keeps one code path instead of two.
+      #
+      # Each image is pulled by tag and then recorded by digest. Tags move; the
+      # digest is what turns "rebuild it in the same image and compare" into a
+      # reproducible instruction rather than a hope, and BUILD-INFO.json carries
+      # it into the tarball for anyone who wants to try.
       - name: Build the glibc prebuild (glibc 2.28 floor)
         run: |
+          docker pull "${{ matrix.manylinux }}"
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${{ matrix.manylinux }}")
+          echo "building in $digest"
           docker run --rm -v "$PWD:/work" -w /work \
             -e NODE_VERSION="$BUILD_NODE_VERSION" \
+            -e BUILD_IMAGE_DIGEST="$digest" \
             ${{ matrix.manylinux }} bash scripts/build-prebuild.sh
       - name: Build the musl prebuild
         run: |
+          docker pull node:24-alpine
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' node:24-alpine)
+          echo "building in $digest"
           docker run --rm -v "$PWD:/work" -w /work \
+            -e BUILD_IMAGE_DIGEST="$digest" \
             node:24-alpine sh scripts/build-prebuild.sh
       - name: Show what was produced
-        run: find prebuilds -type f -exec ls -l {} +
+        run: find prebuilds build-info -type f -exec ls -l {} +
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: prebuilds-linux-${{ matrix.arch }}
           path: prebuilds/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: buildinfo-linux-${{ matrix.arch }}
+          path: build-info/
           if-no-files-found: error
 
   verify:
@@ -194,6 +298,8 @@ jobs:
             set -e
             ldd --version | head -1
             curl -fsSLO "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-x64.tar.xz"
+            curl -fsSLO "https://nodejs.org/dist/$NODE_VERSION/SHASUMS256.txt"
+            grep " node-$NODE_VERSION-linux-x64.tar.xz$" SHASUMS256.txt | sha256sum -c -
             mkdir -p /opt/node && tar xf node-*.tar.xz -C /opt/node --strip-components=1
             export PATH=/opt/node/bin:$PATH
             # Zero runtime dependencies and builtin-only tests: no install.
@@ -224,6 +330,16 @@ jobs:
           pattern: prebuilds-*
           merge-multiple: true
           path: prebuilds/
+      # BUILD-INFO.json ships in the tarball, so it has to exist BEFORE anything
+      # packs one -- otherwise the tarball these jobs prove installable is not
+      # the tarball that gets published.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: buildinfo-*
+          merge-multiple: true
+          path: build-info/
+      - name: Merge the per-binary build records
+        run: node scripts/build-info.mjs --merge
       - name: Pack the publishable tarball
         run: |
           npm pack --pack-destination /tmp
@@ -254,6 +370,14 @@ jobs:
                 }
                 console.log(\"ok:\", v)
               "
+              # The self-test that ships in the tarball, run against the
+              # installed tree. The pass-count grep is the assertion: node --test
+              # exits 0 when it discovers no tests at all.
+              cd node_modules/nanoepoch
+              npm test
+              node --test --test-reporter=tap test/smoke.test.mjs > /tmp/tap.txt 2>&1 || { cat /tmp/tap.txt; exit 1; }
+              grep -qE "^# pass [1-9][0-9]*\$" /tmp/tap.txt || { echo "FAILED: the shipped self-test ran no tests"; cat /tmp/tap.txt; exit 1; }
+              grep -qE "^# fail 0\$" /tmp/tap.txt || { echo "FAILED: the shipped self-test reported failures"; cat /tmp/tap.txt; exit 1; }
             '
           done
 
@@ -277,6 +401,16 @@ jobs:
           pattern: prebuilds-*
           merge-multiple: true
           path: prebuilds/
+      # BUILD-INFO.json ships in the tarball, so it has to exist BEFORE anything
+      # packs one -- otherwise the tarball these jobs prove installable is not
+      # the tarball that gets published.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: buildinfo-*
+          merge-multiple: true
+          path: build-info/
+      - name: Merge the per-binary build records
+        run: node scripts/build-info.mjs --merge
       # The Visual Studio toolchain cannot be removed from a Windows image, and
       # that is exactly what makes this the sharpest test available: lifecycle
       # scripts stay ENABLED on a machine that could compile, so an empty build/
@@ -299,6 +433,14 @@ jobs:
             if (v % 100n !== 0n) throw new Error("not a FILETIME tick multiple: " + v)
             console.log("ok:", v)
           '
+      - name: Run the self-test that ships in the tarball
+        shell: bash
+        run: |
+          cd /tmp/consumer/node_modules/nanoepoch
+          npm test
+          node --test --test-reporter=tap test/smoke.test.mjs > /tmp/tap.txt 2>&1 || { cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# pass [1-9][0-9]*$' /tmp/tap.txt || { echo "the shipped self-test ran no tests"; cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# fail 0$' /tmp/tap.txt || { echo "the shipped self-test reported failures"; cat /tmp/tap.txt; exit 1; }
       - name: And again with lifecycle scripts disabled
         shell: bash
         run: |
@@ -332,6 +474,16 @@ jobs:
           pattern: prebuilds-*
           merge-multiple: true
           path: prebuilds/
+      # BUILD-INFO.json ships in the tarball, so it has to exist BEFORE anything
+      # packs one -- otherwise the tarball these jobs prove installable is not
+      # the tarball that gets published.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: buildinfo-*
+          merge-multiple: true
+          path: build-info/
+      - name: Merge the per-binary build records
+        run: node scripts/build-info.mjs --merge
       - name: Install the tarball where a compiler is available
         run: |
           xcode-select -p
@@ -349,6 +501,13 @@ jobs:
             nowInto(buffer)
             console.log("ok:", v, nowMicros(), buffer[0])
           '
+      - name: Run the self-test that ships in the tarball
+        run: |
+          cd "$RUNNER_TEMP/consumer/node_modules/nanoepoch"
+          npm test
+          node --test --test-reporter=tap test/smoke.test.mjs > /tmp/tap.txt 2>&1 || { cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# pass [1-9][0-9]*$' /tmp/tap.txt || { echo "the shipped self-test ran no tests"; cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# fail 0$' /tmp/tap.txt || { echo "the shipped self-test reported failures"; cat /tmp/tap.txt; exit 1; }
       - name: And again with lifecycle scripts disabled
         run: |
           cd "$RUNNER_TEMP/consumer"
@@ -369,6 +528,11 @@ jobs:
       # and granular tokens expire within 90 days, which rules them out for
       # automation anyway. Provenance is attached automatically.
       id-token: write
+      # Per-binary build attestations. It sits in this job rather than a
+      # separate one on purpose: attesting elsewhere would mean a second job
+      # holding OIDC-backed signing capability, and one job that can do both is
+      # a smaller surface than two that can each do one.
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -395,6 +559,16 @@ jobs:
           pattern: prebuilds-*
           merge-multiple: true
           path: prebuilds/
+      # BUILD-INFO.json ships in the tarball, so it has to exist BEFORE anything
+      # packs one -- otherwise the tarball these jobs prove installable is not
+      # the tarball that gets published.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: buildinfo-*
+          merge-multiple: true
+          path: build-info/
+      - name: Merge the per-binary build records
+        run: node scripts/build-info.mjs --merge
       - name: Refuse to publish an incomplete set of prebuilds
         run: node scripts/verify-prebuilds.mjs --expect-version "${GITHUB_REF_NAME}"
       - name: Show exactly what the tarball will contain
@@ -402,7 +576,7 @@ jobs:
           npm pack --dry-run
           npm pack --pack-destination /tmp
           tar tzf /tmp/nanoepoch-*.tgz | sort
-      - name: Confirm the tarball carries every prebuild
+      - name: Confirm the tarball carries every prebuild and its build record
         run: |
           tar tzf /tmp/nanoepoch-*.tgz > /tmp/contents.txt
           count=$(grep -c 'prebuilds/.*\.node$' /tmp/contents.txt || true)
@@ -411,18 +585,86 @@ jobs:
             grep 'prebuilds/' /tmp/contents.txt || true
             exit 1
           fi
+          for required in package/BUILD-INFO.json package/build-recipe/binding.gyp package/test/smoke.test.mjs; do
+            grep -qx "$required" /tmp/contents.txt || { echo "the tarball is missing $required"; exit 1; }
+          done
       # Dropping the install script is only half of the promise: npm compiles a
-      # package whose tarball root holds a binding.gyp even when no install
-      # script exists anywhere. Only the tarball can be checked for that, and
-      # only here -- the repository keeps its binding.gyp on purpose.
+      # package whose tarball ROOT holds a binding.gyp even when no install
+      # script exists anywhere. The pattern is deliberately any bare *.gyp at
+      # that level rather than the one filename, because npm's manifest
+      # preparation globs "*.gyp" there -- while build-recipe/binding.gyp, one
+      # directory down, is invisible to both of npm's checks and is how the
+      # tarball can carry an auditable recipe and still compile nothing.
       - name: Confirm the tarball runs nothing at install time
         run: |
-          if grep -qE '^package/(binding\.gyp|scripts/)' /tmp/contents.txt; then
+          if grep -qE '^package/([^/]*\.gyp|scripts/)' /tmp/contents.txt; then
             echo "the tarball carries files npm would run or build at install time:"
-            grep -E '^package/(binding\.gyp|scripts/)' /tmp/contents.txt
+            grep -E '^package/([^/]*\.gyp|scripts/)' /tmp/contents.txt
             exit 1
           fi
-          echo "no binding.gyp and no scripts/ in the tarball"
+          echo "no *.gyp at the tarball root and no scripts/ in the tarball"
+      # The 0.3.0 failure was npm REWRITING the manifest at publish time, and
+      # the only check for it so far runs after the upload. `npm publish
+      # --dry-run --json` reports the manifest npm would actually send, so the
+      # same fault can be refused before it reaches the registry -- and it
+      # verifies that this npm still honours "gypfile": false, which is the
+      # behaviour, not the setting, that broke.
+      - name: Confirm npm would upload a manifest that runs nothing
+        run: |
+          npm publish --dry-run --json > /tmp/dry-run.json
+          node -e '
+            const reported = JSON.parse(require("fs").readFileSync("/tmp/dry-run.json", "utf8"))
+            const entry = Array.isArray(reported) ? reported[0] : reported
+            const pkg = require("./package.json")
+            const lifecycle = ["preinstall", "install", "postinstall"].filter((name) => pkg.scripts?.[name])
+            if (lifecycle.length > 0 || pkg.gypfile !== false) {
+              console.error("the manifest npm is about to upload would run code at install time")
+              process.exit(1)
+            }
+            const files = (entry.files || []).map((file) => file.path)
+            const rootGyp = files.filter((file) => /^[^/]+\.gyp$/.test(file))
+            if (rootGyp.length > 0) {
+              console.error("npm would upload a tarball with a *.gyp at its root: " + rootGyp.join(", "))
+              process.exit(1)
+            }
+            console.log("npm would upload " + entry.filename + " (" + files.length + " files, integrity " + entry.integrity + ")")
+            require("fs").writeFileSync("/tmp/pack-integrity.txt", entry.integrity)
+          '
+      # Per-binary attestations, in the job that already holds id-token: write.
+      # npm provenance covers the tarball and needs a registry round-trip to
+      # check; these cover each .node file on its own, so a consumer can verify
+      # the one binary they actually loaded straight off disk:
+      #   gh attestation verify node_modules/nanoepoch/prebuilds/<target>/<file>.node --repo eg97park/nanoepoch
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            prebuilds/**/*.node
+            BUILD-INFO.json
+      # `npm sbom` validates the whole dependency graph before it emits, so it
+      # needs an installed tree even with --omit dev. --ignore-scripts runs none
+      # of it and the committed lockfile pins every integrity hash, which is the
+      # same install every other job in this workflow already performs.
+      #
+      # The document is short by construction -- one component, no dependencies
+      # -- and that is the point: "zero runtime dependencies" becomes something
+      # a scanner can ingest rather than a sentence in a README.
+      - name: Generate the SBOM
+        run: |
+          npm ci --ignore-scripts
+          npm sbom --sbom-format cyclonedx --omit dev > /tmp/nanoepoch.cdx.json
+          node -e '
+            const sbom = require("/tmp/nanoepoch.cdx.json")
+            const dependencies = (sbom.components || []).length
+            console.log(sbom.bomFormat + " " + sbom.specVersion + ", " + dependencies + " dependencies")
+            if (dependencies !== 0) {
+              console.error("this package is supposed to have no runtime dependencies")
+              process.exit(1)
+            }
+          '
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: /tmp/nanoepoch-*.tgz
+          sbom-path: /tmp/nanoepoch.cdx.json
       - run: npm publish
       # 0.3.0 shipped a clean tarball behind a manifest npm had rewritten. npm
       # prepares the manifest it uploads from the PUBLISH DIRECTORY, which is
@@ -440,6 +682,10 @@ jobs:
             echo "manifest not visible yet (attempt $attempt)"
             sleep 10
           done
+          # Without this the loop falls through on total failure and the next
+          # step dies with MODULE_NOT_FOUND -- from the one step whose entire
+          # job is explaining a 0.3.0-class breakage in plain words.
+          [ -s /tmp/manifest.json ] || { echo "the published manifest never became visible; check the registry manually"; exit 1; }
           node -e '
             const manifest = require("/tmp/manifest.json")
             const scripts = manifest.scripts || {}
@@ -452,14 +698,275 @@ jobs:
               process.exit(1)
             }
             console.log("published manifest is clean: " + JSON.stringify(scripts))
+
+            // The registry must carry the signature that `npm audit signatures`
+            // checks. Attestations can lag behind the publish, so a missing one
+            // is reported rather than failed -- the post-publish install matrix
+            // runs `npm audit signatures` for real once propagation settles.
+            if (!manifest.dist || !manifest.dist.signatures || manifest.dist.signatures.length === 0) {
+              console.error("the published version carries no registry signature")
+              process.exit(1)
+            }
+            if (!manifest.dist.attestations) {
+              console.warn("note: no attestations recorded yet (propagation lag is normal)")
+            }
+
+            // npm packs its own tarball at publish time. If that differs from
+            // the one every gate above inspected, the gates measured something
+            // that was never uploaded.
+            const packed = require("fs").readFileSync("/tmp/pack-integrity.txt", "utf8").trim()
+            if (packed && manifest.dist.integrity && packed !== manifest.dist.integrity) {
+              console.warn("note: packed integrity " + packed + " != published " + manifest.dist.integrity)
+              console.warn("the gates inspected a different tarball than the registry received; investigate before the next release")
+            }
           '
+
+  # Everything above this line inspects a tarball this workflow packed. Nothing
+  # so far has installed what the REGISTRY serves, which is the only artifact a
+  # consumer ever sees -- and the gap between those two is exactly where 0.3.0
+  # lived: a clean tarball behind a manifest npm had rewritten.
+  #
+  # These jobs cannot un-publish a bad release; npm's OIDC token is scoped to
+  # `npm publish` and cannot move a dist-tag, and the long-lived token that
+  # could is a thing this project deliberately does not have. What they can do
+  # is refuse to announce it, and say so loudly.
+  wait-for-registry:
+    name: wait for the published version to resolve
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      # The abbreviated ("corgi") packument is the document `npm install`
+      # actually resolves against. A 200 on the per-version URL can precede it,
+      # so polling that one instead would send the matrix below off to install a
+      # version the CLI still answers ETARGET for.
+      - name: Poll until npm can resolve the new version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for attempt in $(seq 1 20); do
+            if curl -fsSL -H 'Accept: application/vnd.npm.install-v1+json' \
+                 https://registry.npmjs.org/nanoepoch -o /tmp/corgi.json &&
+               node -e 'process.exit(require("/tmp/corgi.json").versions[process.argv[1]] ? 0 : 1)' "$version"; then
+              echo "nanoepoch@$version is resolvable"
+              exit 0
+            fi
+            echo "not resolvable yet (attempt $attempt)"
+            sleep 15
+          done
+          echo "nanoepoch@$version never became resolvable from the registry"
+          exit 1
+
+  # Six images in one job rather than six jobs: glibc and musl across three Node
+  # lines, on both architectures, in two runners instead of twelve.
+  verify-registry-linux:
+    name: install from the registry (linux-${{ matrix.arch }})
+    needs: wait-for-registry
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: ubuntu-latest }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    steps:
+      - name: Install the published package in every supported image
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for image in node:22-slim node:24-slim node:26-slim node:22-alpine node:24-alpine node:26-alpine; do
+            echo "=== $image ==="
+            # docker run, never a container job: the runner cannot inject a
+            # musl Node, so JavaScript actions fail inside arm64 Alpine.
+            docker run --rm -e VERSION="$version" "$image" sh -c '
+              set -e
+              mkdir -p /app && cd /app && npm init -y >/dev/null
+              for attempt in 1 2 3 4 5; do
+                npm install "nanoepoch@$VERSION" --no-audit --no-fund && break
+                sleep 10
+              done
+              node -e "
+                const pkg = require(\"nanoepoch/package.json\")
+                if (pkg.version !== process.env.VERSION) throw new Error(\"installed \" + pkg.version)
+              "
+              test ! -d node_modules/nanoepoch/build
+              node -e "
+                const { now, nowMicros, nowInto } = require(\"nanoepoch\")
+                const v = now()
+                if (typeof v !== \"bigint\" || v < 1750000000000000000n || v > 4000000000000000000n) {
+                  throw new Error(\"implausible timestamp: \" + v)
+                }
+                const buffer = new BigUint64Array(1)
+                nowInto(buffer)
+                console.log(\"ok:\", v, nowMicros(), buffer[0])
+              "
+              cd node_modules/nanoepoch
+              npm test
+              node --test --test-reporter=tap test/smoke.test.mjs > /tmp/tap.txt 2>&1 || { cat /tmp/tap.txt; exit 1; }
+              grep -qE "^# pass [1-9][0-9]*\$" /tmp/tap.txt || { echo "FAILED: the shipped self-test ran no tests"; cat /tmp/tap.txt; exit 1; }
+              grep -qE "^# fail 0\$" /tmp/tap.txt
+            '
+          done
+      # The step that finally ties registry bytes to build-job bytes: every
+      # binary in the installed tree is hashed and compared against the record
+      # its own build job wrote. Everything before this compared a local pack to
+      # itself.
+      - name: The installed binaries must match their build records
+        if: matrix.arch == 'x64'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p /tmp/consumer && cd /tmp/consumer && npm init -y >/dev/null
+          npm install "nanoepoch@$version" --no-audit --no-fund
+          npm audit signatures
+          node -e '
+            const { createHash } = require("crypto")
+            const { readFileSync } = require("fs")
+            const root = "node_modules/nanoepoch"
+            const info = require("./" + root + "/BUILD-INFO.json")
+            let checked = 0
+            for (const binary of info.binaries) {
+              const actual = createHash("sha256").update(readFileSync(root + "/" + binary.path)).digest("hex")
+              if (actual !== binary.sha256) {
+                throw new Error(binary.path + " hashes to " + actual + ", recorded " + binary.sha256)
+              }
+              checked += 1
+            }
+            if (checked !== 8) throw new Error("expected 8 binaries, checked " + checked)
+            console.log("all 8 registry binaries match the bytes their build jobs recorded")
+          '
+
+  verify-registry-windows:
+    name: install from the registry (${{ matrix.os }} / node ${{ matrix.node }})
+    needs: wait-for-registry
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, node: '22' }
+          - { os: windows-latest, node: '24' }
+          - { os: windows-latest, node: '26' }
+          - { os: windows-11-arm, node: '24' }
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install the published package and run its self-test
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p /tmp/consumer && cd /tmp/consumer && npm init -y >/dev/null
+          for attempt in 1 2 3 4 5; do
+            npm install "nanoepoch@$version" --no-audit --no-fund && break
+            sleep 10
+          done
+          test ! -d node_modules/nanoepoch/build
+          node -e '
+            const v = require("nanoepoch").now()
+            if (typeof v !== "bigint" || v < 1750000000000000000n) throw new Error("implausible: " + v)
+            if (v % 100n !== 0n) throw new Error("not a FILETIME tick multiple: " + v)
+            console.log("ok:", v)
+          '
+          cd node_modules/nanoepoch
+          npm test
+          node --test --test-reporter=tap test/smoke.test.mjs > /tmp/tap.txt 2>&1 || { cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# pass [1-9][0-9]*$' /tmp/tap.txt || { echo "the shipped self-test ran no tests"; cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# fail 0$' /tmp/tap.txt
+
+  verify-registry-macos:
+    name: install from the registry (${{ matrix.os }})
+    needs: wait-for-registry
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Install the published package and run its self-test
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer" && npm init -y >/dev/null
+          for attempt in 1 2 3 4 5; do
+            npm install "nanoepoch@$version" --no-audit --no-fund && break
+            sleep 10
+          done
+          test ! -d node_modules/nanoepoch/build
+          node -e '
+            const { now, nowMicros, nowInto } = require("nanoepoch")
+            const buffer = new BigUint64Array(1)
+            nowInto(buffer)
+            console.log("ok:", now(), nowMicros(), buffer[0])
+          '
+          cd node_modules/nanoepoch
+          npm test
+          node --test --test-reporter=tap test/smoke.test.mjs > /tmp/tap.txt 2>&1 || { cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# pass [1-9][0-9]*$' /tmp/tap.txt || { echo "the shipped self-test ran no tests"; cat /tmp/tap.txt; exit 1; }
+          grep -qE '^# fail 0$' /tmp/tap.txt
+
+  # The package is already live when this runs, so filing an issue is the whole
+  # remediation channel. The runbook, deliberately in the workflow rather than a
+  # wiki nobody opens:
+  #
+  #   1. The bad version cannot be withdrawn. Do not unpublish and do not delete
+  #      the tag -- npm forbids republishing a version, so both make it worse.
+  #   2. Fix forward: patch, tag the next version, let this workflow run again.
+  #      That is what 0.3.0 -> 0.3.1 was.
+  #   3. Then `npm deprecate nanoepoch@<bad> "..."` by hand. It needs an OTP,
+  #      which is why it is not automated here.
+  alarm:
+    name: raise the alarm if the published package is broken
+    needs: [wait-for-registry, verify-registry-linux, verify-registry-windows, verify-registry-macos]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      # Both spelled out: job-level permissions REPLACE the workflow block
+      # rather than adding to it, so omitting contents would leave this job
+      # unable to read the repository at all.
+      contents: read
+      issues: write
+    steps:
+      - name: File an issue naming the failed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          body="nanoepoch@$version is PUBLISHED but post-publish verification failed.
+
+          Run: $RUN_URL
+
+          The registry cannot be rolled back from here: the OIDC token this
+          workflow uses is scoped to \`npm publish\` and cannot move a dist-tag.
+          Fix forward with a patch release, then \`npm deprecate nanoepoch@$version\`
+          by hand (it needs an OTP)."
+          # An alarm that fails silently is worse than none, and `gh issue
+          # create` fails opaquely when Issues are disabled on the repository.
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "post-publish verification failed for $GITHUB_REF_NAME" \
+            --body "$body" || {
+              echo "could not file an issue -- are Issues disabled?"
+              echo "nanoepoch@$version is published and unverified. Run: $RUN_URL"
+              exit 1
+            }
 
   # Mirrors the npm release on the repository's Releases tab. A separate job so
   # that contents: write never sits in the same job as id-token: write -- a
   # compromised step in one cannot use the other's permission.
+  #
+  # It waits on the registry verification so that a release which installs badly
+  # is never announced -- but for now it announces anyway, because `always() &&`
+  # makes those three jobs advisory. That is deliberate for exactly one release:
+  # nobody yet knows how often CDN propagation lag turns a perfectly good
+  # publish into a red job, and finding out by blocking the first one is the
+  # wrong way round. The jobs still go red and `alarm` still fires.
+  #
+  # To make it a hard gate, delete `always() && ` from the line below. That is
+  # the whole change.
   github-release:
     name: create the GitHub release
-    needs: publish
+    needs: [publish, verify-registry-linux, verify-registry-windows, verify-registry-macos]
+    if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -467,7 +974,16 @@ jobs:
       # gh is preinstalled on the runner; using it directly keeps third-party
       # actions out of the release path.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Create the release with generated notes
+      # --generate-notes builds the body from pull request titles. This
+      # repository commits straight to main, so what it produces is a compare
+      # link and nothing else. CHANGELOG.md is the actual record, and the
+      # release gate already refused to publish without a section for this
+      # version, so the extraction below cannot come up empty by surprise.
+      - name: Cut the release notes from the changelog
+        run: |
+          node scripts/changelog.mjs --section "$GITHUB_REF_NAME" > /tmp/notes.md
+          cat /tmp/notes.md
+      - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -475,4 +991,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --verify-tag \
-            --generate-notes
+            --notes-file /tmp/notes.md
