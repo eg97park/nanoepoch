@@ -8,7 +8,7 @@ This file, not the GitHub release notes, is the record. The notes are generated
 from pull request titles, and this repository commits to `main` directly, so
 they say almost nothing.
 
-## Unreleased
+## 0.4.0 — 2026-08-08
 
 ### Added
 
