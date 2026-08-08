@@ -16,10 +16,13 @@
 //
 // Usage: node scripts/verify-prebuilds.mjs [--expect-version <version>] [--root <dir>]
 
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
+import { inspect } from './lib/hardening.mjs'
+import { section } from './lib/changelog.mjs'
 
 const require = createRequire(import.meta.url)
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -164,18 +167,36 @@ function checkContents (relative) {
       `but ${directory} requires ${expectedMachine}`)
   }
 
-  // The libc the binary was really linked against shows up as its DT_NEEDED
-  // strings: the musl builds name libc.musl-<arch>.so.1 and nothing else, the
-  // glibc builds name libc.so.6. A filename tag that contradicts the strings
-  // means the loader will hand this binary to the wrong libc at require time.
-  const wantsMusl = filename.includes('.musl.')
-  const referencesMusl = data.includes('libc.musl-')
-  const referencesGlibc = data.includes('libc.so.6')
-  if (wantsMusl && (!referencesMusl || referencesGlibc)) {
-    problems.push(`libc mismatch: prebuilds/${relative} is tagged musl but is linked against glibc`)
-  } else if (!wantsMusl && (!referencesGlibc || referencesMusl)) {
-    problems.push(`libc mismatch: prebuilds/${relative} is tagged glibc but is linked against musl`)
+  // The libc claim in the filename, and everything else the linker was asked to
+  // do, are checked together by reading the dynamic section -- see
+  // checkHardening below. That covers the libc tag exactly (DT_NEEDED must be
+  // the one libc and nothing else) rather than by the substring search this
+  // used to do, which could not tell "links against glibc" from "happens to
+  // contain that string somewhere".
+}
+
+// Everything binding.gyp asks the toolchain for and no functional test can see:
+// RELRO, BIND_NOW, a stack canary, a non-executable stack, an exact DT_NEEDED
+// set, the advertised glibc and macOS floors, Control Flow Guard on Windows,
+// and that the binary was really stripped.
+function checkHardening (relative) {
+  const [directory, filename] = relative.split('/')
+  const target = directory.startsWith('linux-')
+    ? `${directory}-${filename.includes('.musl.') ? 'musl' : 'glibc'}`
+    : directory
+
+  let data
+  try {
+    data = readFileSync(join(root, 'prebuilds', directory, filename))
+  } catch {
+    return // already reported by checkContents
   }
+
+  // skipMachine: checkContents has already compared the architecture against
+  // the directory name, in the wording that names the merge accident it looks
+  // for. Two reports of one fault read as two faults.
+  const { problems: faults } = inspect(data, target, { skipMachine: true })
+  for (const fault of faults) problems.push(`prebuilds/${relative}: ${fault}`)
 }
 
 const found = listPrebuilds()
@@ -188,6 +209,7 @@ for (const relative of EXPECTED) {
     problems.push(`suspiciously small prebuild (${size} bytes): prebuilds/${relative}`)
   } else {
     checkContents(relative)
+    checkHardening(relative)
   }
 }
 
@@ -235,20 +257,159 @@ if (existsSync(join(packageRoot, 'binding.gyp')) && pkg.gypfile !== false) {
 
 for (const entry of Array.isArray(pkg.files) ? pkg.files : []) {
   const normalised = entry.replace(/^\.\//, '')
-  if (normalised === 'binding.gyp') {
-    problems.push('package.json "files" ships binding.gyp, which npm runs as an implicit node-gyp rebuild at install time')
+  // Any bare *.gyp at the package root, not just the literal binding.gyp: npm's
+  // manifest preparation globs "*.gyp" over the publish directory, so the rule
+  // being defended here is wider than the one filename. (Install-time detection
+  // itself does look only for binding.gyp -- but a gate that permits root
+  // "other.gyp" is a gate that permits renaming the problem.) Nothing at the
+  // root needs a .gyp extension; the auditable copy lives in build-recipe/,
+  // which neither npm code path can see.
+  if (/^[^/]+\.gyp$/.test(normalised)) {
+    problems.push(`package.json "files" ships ${entry}; a *.gyp in the tarball root is what npm turns into an implicit node-gyp rebuild at install time`)
   } else if (normalised === 'scripts' || normalised.startsWith('scripts/')) {
     problems.push(`package.json "files" ships ${entry}; nothing under scripts/ is meant to reach a consumer`)
+  } else if (normalised === 'test' || normalised.startsWith('test/')) {
+    // One exact path, never the directory. `node --test` discovers everything
+    // under test/ -- including files a future contributor adds as helpers or
+    // fixtures, and including .ts -- so whitelisting the directory would run
+    // whatever lands there on every consumer's machine.
+    if (normalised !== 'test/smoke.test.mjs') {
+      problems.push(`package.json "files" ships ${entry}; only test/smoke.test.mjs may ship, ` +
+        'because node --test executes every file under test/ on a consumer\'s machine')
+    }
   }
 }
 
 const expectVersionIndex = process.argv.indexOf('--expect-version')
-if (expectVersionIndex !== -1) {
+const releasing = expectVersionIndex !== -1
+if (releasing) {
   const expected = process.argv[expectVersionIndex + 1]?.replace(/^v/, '')
   if (expected && expected !== pkg.version) {
     problems.push(`tag says ${expected} but package.json says ${pkg.version}`)
   }
+
+  // The GitHub release notes are cut from this section. Checking it here, before
+  // publish, is what stops a missing entry from being discovered by the job that
+  // runs after the package is already on the registry and cannot be recalled.
+  // Same extraction the release job uses, so the two cannot disagree about what
+  // counts as a section.
+  try {
+    const changelog = readFileSync(join(packageRoot, 'CHANGELOG.md'), 'utf8')
+    if (section(changelog, pkg.version) === null) {
+      problems.push(`CHANGELOG.md has no "## ${pkg.version}" section; the release notes are cut from it`)
+    }
+  } catch (error) {
+    problems.push(`CHANGELOG.md is missing or unreadable (${error.message})`)
+  }
 }
+
+// The lockfile is what makes `npm ci` reproduce a build. If it has drifted from
+// the manifest, every build container silently resolves its own node-gyp and
+// the recorded compiler-of-record in BUILD-INFO.json stops meaning anything.
+try {
+  const lock = require(join(packageRoot, 'package-lock.json'))
+  if (lock.version !== pkg.version || lock.packages?.['']?.version !== pkg.version) {
+    problems.push(`package-lock.json says ${lock.version} but package.json says ${pkg.version}; run npm install to resync`)
+  }
+} catch (error) {
+  problems.push(`package-lock.json is missing or unreadable (${error.message}); npm ci cannot run without it`)
+}
+
+// BUILD-INFO.json records what each build job produced: the sha256 of every
+// binary and the hash of the source it was compiled from. Re-checking it here
+// covers the one step no per-platform job can see -- the merge of six artifact
+// downloads into one tree, where a path collision keeps the right filename and
+// the wrong bytes.
+//
+// Required only when releasing. A contributor running `npm pack` or
+// prepublishOnly locally has no build-info to merge, and should not be told
+// their checkout is broken; but if the file IS present it is always checked in
+// full, so a stale one cannot pass by being ignored.
+function checkBuildInfo () {
+  const file = join(root, 'BUILD-INFO.json')
+  if (!existsSync(file)) {
+    if (releasing) {
+      problems.push('BUILD-INFO.json is missing; run `node scripts/build-info.mjs --merge` after downloading the build-info artifacts')
+    }
+    return
+  }
+
+  let info
+  try {
+    info = JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    problems.push(`BUILD-INFO.json is unreadable: ${error.message}`)
+    return
+  }
+
+  if (info.version !== pkg.version) {
+    problems.push(`BUILD-INFO.json describes ${info.version} but this is ${pkg.version}`)
+  }
+
+  const recorded = new Map()
+  for (const binary of Array.isArray(info.binaries) ? info.binaries : []) {
+    if (typeof binary?.path === 'string') recorded.set(binary.path, binary)
+  }
+
+  for (const relative of EXPECTED) {
+    const key = `prebuilds/${relative}`
+    const binary = recorded.get(key)
+    if (!binary) {
+      problems.push(`BUILD-INFO.json has no record for ${key}`)
+      continue
+    }
+    let bytes
+    try {
+      bytes = readFileSync(join(root, 'prebuilds', relative))
+    } catch {
+      continue // already reported as missing or unreadable above
+    }
+    const actual = createHash('sha256').update(bytes).digest('hex')
+    if (actual !== binary.sha256) {
+      problems.push(`${key} hashes to ${actual} but BUILD-INFO.json records ${binary.sha256}`)
+    }
+    if (binary.size !== bytes.length) {
+      problems.push(`${key} is ${bytes.length} bytes but BUILD-INFO.json records ${binary.size}`)
+    }
+  }
+
+  for (const key of recorded.keys()) {
+    if (!EXPECTED.includes(key.replace(/^prebuilds\//, ''))) {
+      problems.push(`BUILD-INFO.json records ${key}, which is not in the support matrix`)
+    }
+  }
+
+  // Two identical hashes means one build's output landed on top of another's.
+  const seen = new Map()
+  for (const binary of recorded.values()) {
+    if (seen.has(binary.sha256)) {
+      problems.push(`${binary.path} and ${seen.get(binary.sha256)} are byte-identical, so one build overwrote the other`)
+    } else {
+      seen.set(binary.sha256, binary.path)
+    }
+  }
+
+  // The tarball ships src/nanoepoch.c and build-recipe/binding.gyp so the
+  // binaries can be rebuilt from what the consumer received. That only means
+  // anything if the shipped source is the source they were built from.
+  for (const [relative, expectedHash] of Object.entries(info.source ?? {})) {
+    let actual
+    try {
+      actual = createHash('sha256').update(readFileSync(join(packageRoot, relative))).digest('hex')
+    } catch (error) {
+      problems.push(`BUILD-INFO.json records a hash for ${relative}, which cannot be read (${error.message})`)
+      continue
+    }
+    if (actual !== expectedHash) {
+      problems.push(`${relative} hashes to ${actual} but the binaries were built from ${expectedHash}`)
+    }
+  }
+  if (releasing && !info.source) {
+    problems.push('BUILD-INFO.json carries no "source" block, so nothing ties the shipped source to the binaries')
+  }
+}
+
+checkBuildInfo()
 
 if (problems.length > 0) {
   console.error(`refusing to publish nanoepoch@${pkg.version}:`)

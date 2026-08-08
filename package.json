@@ -26,14 +26,19 @@
     "index.d.ts",
     "index.d.mts",
     "src/",
-    "prebuilds/"
+    "prebuilds/",
+    "test/smoke.test.mjs",
+    "build-recipe/",
+    "BUILD-INFO.json"
   ],
   "scripts": {
-    "build": "node-gyp rebuild",
+    "dev:build": "node-gyp rebuild",
     "make-prebuild": "node scripts/prebuild.mjs",
+    "merge-build-info": "node scripts/build-info.mjs --merge",
     "test": "node --test",
+    "test:smoke": "node --test test/smoke.test.mjs",
     "bench": "node bench/compare.mjs",
-    "attw": "npx --yes @arethetypeswrong/cli@0.18.5 --pack . --profile node16",
+    "attw": "npx --yes --ignore-scripts @arethetypeswrong/cli@0.18.5 --pack . --profile node16",
     "prepublishOnly": "node scripts/verify-prebuilds.mjs"
   },
   "devDependencies": {
@@ -65,5 +70,8 @@
   },
   "homepage": "https://github.com/eg97park/nanoepoch#readme",
   "license": "MIT",
-  "sideEffects": false
+  "sideEffects": [
+    "./index.js",
+    "./index.mjs"
+  ]
 }
