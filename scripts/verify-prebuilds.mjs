@@ -419,5 +419,11 @@ if (problems.length > 0) {
   process.exit(1)
 }
 
-console.log(`nanoepoch@${pkg.version}: all ${EXPECTED.length} prebuilds present, architectures and libc links verified`)
-for (const relative of EXPECTED) console.log(`  prebuilds/${relative} (${found.get(relative)} bytes)`)
+// stderr, like every other line this script writes. It runs as prepublishOnly,
+// and npm's --json modes use stdout as a data channel: `npm publish --dry-run
+// --json > file` puts whatever a lifecycle script printed at the top of that
+// file, ahead of the JSON. The release's own dry-run check parses exactly that
+// file, so a success message on stdout failed the release by announcing that
+// everything was fine.
+console.error(`nanoepoch@${pkg.version}: all ${EXPECTED.length} prebuilds present, architectures and libc links verified`)
+for (const relative of EXPECTED) console.error(`  prebuilds/${relative} (${found.get(relative)} bytes)`)
