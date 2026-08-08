@@ -322,6 +322,17 @@ static napi_value ne_now_into(napi_env env, napi_callback_info info) {
  * _filetimeToNs(ticks) - unstable test hook exposing the pure conversion used
  * by the Windows read path. Not part of the public API and not declared in the
  * TypeScript definitions; it may be removed in any release.
+ *
+ * It is compiled into the PUBLISHED binaries on purpose, rather than behind a
+ * test-only define. The exact 1601->1970 vectors in test/epoch.test.mjs are the
+ * only assertions in the suite that do not depend on what the clock happens to
+ * say, and the release workflow runs that suite against the prebuilt binaries
+ * themselves. Compiling the hook out of the prebuilds would mean the conversion
+ * is only ever verified in a binary that nobody installs -- and the Windows
+ * boundaries it pins, including the 9223372036854775800 ceiling, cannot be
+ * reached any other way, because no CI job can set a machine's clock to 2262.
+ * The function is pure, holds no state, reads no clock, and validates its own
+ * argument, so shipping it enables nothing that now() does not.
  */
 static napi_value ne_filetime_to_ns_js(napi_env env, napi_callback_info info) {
   size_t argc = 1;

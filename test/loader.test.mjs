@@ -35,6 +35,12 @@ const target = `${process.platform}-${process.arch}`
 // other, which is not what any test here is about.
 function realBinary () {
   for (const directory of [join(packageRoot, 'build', 'Release'), join(packageRoot, 'build', 'Debug')]) {
+    // Same order as the loader's firstBuildOutput: the exact name first, the
+    // sorted scan only as a fallback. A fixture built from a different file
+    // than the one the loader would choose is testing the wrong binary.
+    const exact = join(directory, 'nanoepoch.node')
+    if (existsSync(exact)) return exact
+
     let entries = []
     try {
       entries = readdirSync(directory).filter((entry) => entry.endsWith('.node')).sort()
@@ -50,7 +56,7 @@ function realBinary () {
     if (existsSync(file)) return file
   }
 
-  throw new Error('no .node in build/ or prebuilds/; run `npm run build` first')
+  throw new Error('no .node in build/ or prebuilds/; run `npm run dev:build` first')
 }
 
 const binary = realBinary()
@@ -129,6 +135,35 @@ test('a local build outranks a bundled prebuild', () => {
   assert.ok(result.ok, `expected the local build to load, got:\n${result.stderr}`)
   assert.equal(result.used.length, 1)
   assert.ok(result.used[0].includes('Release'), `expected build/Release to win, used ${result.used[0]}`)
+})
+
+test('a stale .node in build/Release does not outrank nanoepoch.node', () => {
+  // "aaa" sorts before "nanoepoch", so a plain sorted scan picks it -- and
+  // because resolveCandidates returns the local build alone, picking it also
+  // suppresses every prebuild. The result would be a dlopen error naming a file
+  // this project never built.
+  const root = makeFixture({
+    'build/Release/aaa.node': 'not a shared object',
+    'build/Release/nanoepoch.node': 'real'
+  })
+
+  const result = load(root)
+  assert.ok(result.ok, `expected nanoepoch.node to win over aaa.node, got:\n${result.stderr}`)
+  assert.equal(result.used.length, 1)
+  assert.ok(result.used[0].endsWith('nanoepoch.node'), `loaded ${result.used[0]}`)
+})
+
+test('a directory named *.node is not mistaken for a build output', () => {
+  const name = process.platform === 'linux' ? nanoepoch._candidateNames()[0] : 'nanoepoch.node'
+  const root = makeFixture({ [`prebuilds/${target}/${name}`]: 'real' })
+  // makeFixture only writes files, and the point here is an entry that is not
+  // one: readdirSync would list it and endsWith('.node') would accept it.
+  mkdirSync(join(root, 'build', 'Release', 'zzz.node'), { recursive: true })
+
+  const result = load(root)
+  assert.ok(result.ok, `expected the prebuild to load, got:\n${result.stderr}`)
+  assert.equal(result.used.length, 1)
+  assert.ok(result.used[0].includes('prebuilds'), `loaded ${result.used[0]}`)
 })
 
 test('a broken local build is reported, not masked by a working prebuild', () => {

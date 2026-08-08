@@ -151,6 +151,12 @@ build/
 # tarball. Committing them would let a stale binary outlive the source it was
 # built from.
 prebuilds/
+
+# One record per prebuilt binary, written by scripts/prebuild.mjs and merged
+# into BUILD-INFO.json at release time. Same reasoning as prebuilds/: it
+# describes bytes that are not in the repository.
+build-info/
+BUILD-INFO.json
 squishy-tinkering-heron.md
 
 # Deno writes this when a Deno smoke test runs in the repo. This is not a

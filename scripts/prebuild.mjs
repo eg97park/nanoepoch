@@ -17,15 +17,16 @@
 //
 // Usage: node scripts/prebuild.mjs [--libc glibc|musl]
 
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
-const { name } = require(join(packageRoot, 'package.json'))
+const { name, version } = require(join(packageRoot, 'package.json'))
 
 function fail (message) {
   console.error(`prebuild: ${message}`)
@@ -122,11 +123,15 @@ const source = join(releaseDir, built[0])
 // Stripping is what takes the Linux binary from roughly 100KB of debug info to
 // 14KB. Windows keeps its symbols in a separate .pdb that is never copied, so
 // there is nothing to strip there.
+//
+// Not optional: an unstripped binary carries the build machine's absolute paths
+// and is the difference between "the same image rebuilds to the same bytes" and
+// a determinism report nobody can act on. A base image that loses binutils
+// would otherwise ship one silently, and the release gate checks for leftover
+// symbol and debug sections precisely because this step must not be skippable.
 if (process.platform === 'linux' || process.platform === 'darwin') {
   const args = process.platform === 'darwin' ? ['-Sx', source] : ['--strip-all', source]
-  if (!run('strip', args, { optional: true })) {
-    console.error('prebuild: strip is unavailable, shipping the unstripped binary')
-  }
+  run('strip', args)
 }
 
 const targetDir = join(packageRoot, 'prebuilds', `${process.platform}-${process.arch}`)
@@ -135,3 +140,91 @@ mkdirSync(targetDir, { recursive: true })
 copyFileSync(source, target)
 
 console.log(`prebuild: ${target} (${statSync(target).size} bytes)`)
+
+function sha256 (file) {
+  return createHash('sha256').update(readFileSync(file)).digest('hex')
+}
+
+// First line of a version banner, or null when the tool is not there. Never
+// fatal: a missing compiler banner should degrade the record, not fail a build
+// that has already succeeded.
+function capture (command, args) {
+  try {
+    const result = spawnSync(command, args, { encoding: 'utf8', windowsHide: true, shell: false })
+    if (result.error || result.status !== 0) return null
+    return `${result.stdout || result.stderr}`.split('\n')[0].trim() || null
+  } catch {
+    return null
+  }
+}
+
+function compilerBanner () {
+  if (process.platform === 'win32') {
+    // cl.exe writes its banner only when compiling something, and node-gyp
+    // invokes it through MSBuild, so there is no cheap version query here. The
+    // runner image identity is what pins it instead, and BUILD-INFO records it.
+    return process.env.VSCMD_VER
+      ? `MSVC toolset ${process.env.VSCMD_VER}`
+      : 'MSVC via node-gyp; see imageOs/imageVersion'
+  }
+  return capture(process.env.CC || 'cc', ['--version'])
+}
+
+function nodeGypVersion () {
+  try {
+    return require(join(packageRoot, 'node_modules', 'node-gyp', 'package.json')).version
+  } catch {
+    return null
+  }
+}
+
+// One sidecar per binary rather than one file per job: the Linux jobs run this
+// script twice over the same mounted workspace (glibc, then musl), and a shared
+// filename would have the second pass overwrite the first.
+//
+// It goes in build-info/, never in prebuilds/. verify-prebuilds.mjs only
+// collects *.node from the target directories and only reports stray entries at
+// the TOP level, so a .json dropped into prebuilds/<target>/ would pass every
+// check and then ship in a place nothing describes.
+const record = {
+  path: `prebuilds/${process.platform}-${process.arch}/${name}${tag}.node`,
+  sha256: sha256(target),
+  size: statSync(target).size,
+  platform: process.platform,
+  arch: process.arch,
+  libc: tag ? tag.slice(1) : null,
+  // What the binaries were compiled FROM. This is the link that makes the
+  // shipped src/ and build-recipe/ auditable rather than decorative: the
+  // release gate refuses a tarball whose source does not hash to what every
+  // build job recorded.
+  source: {
+    'src/nanoepoch.c': sha256(join(packageRoot, 'src', 'nanoepoch.c')),
+    'binding.gyp': sha256(join(packageRoot, 'binding.gyp'))
+  },
+  build: {
+    node: process.version,
+    napi: process.versions.napi,
+    modules: process.versions.modules,
+    nodeGyp: nodeGypVersion(),
+    compiler: compilerBanner()
+  },
+  // Absent outside CI, which is the point: a locally produced record should not
+  // look like one a workflow can be held to.
+  ci: {
+    sha: process.env.GITHUB_SHA ?? null,
+    runId: process.env.GITHUB_RUN_ID ?? null,
+    runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+    workflowRef: process.env.GITHUB_WORKFLOW_REF ?? null,
+    imageOs: process.env.ImageOS ?? null,
+    imageVersion: process.env.ImageVersion ?? null,
+    containerImage: process.env.BUILD_IMAGE_DIGEST ?? null
+  },
+  version
+}
+
+const infoDir = join(packageRoot, 'build-info')
+mkdirSync(infoDir, { recursive: true })
+const infoFile = join(infoDir, `${process.platform}-${process.arch}${tag}.json`)
+writeFileSync(infoFile, `${JSON.stringify(record, null, 2)}\n`)
+
+console.log(`prebuild: ${infoFile} (sha256 ${record.sha256})`)

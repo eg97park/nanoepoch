@@ -64,19 +64,45 @@ function candidateNames () {
     : ['nanoepoch.glibc.node', 'nanoepoch.musl.node']
 }
 
+function isLoadableFile (file) {
+  try {
+    // statSync, not lstatSync: a symlinked build output is a legitimate
+    // contributor setup and should be followed, not rejected.
+    const stat = fs.statSync(file, { throwIfNoEntry: false })
+    return stat !== undefined && stat.isFile()
+  } catch {
+    return false
+  }
+}
+
 function firstBuildOutput (directory) {
+  // binding.gyp declares exactly one target, so this is the file a local build
+  // produces, and scripts/prebuild.mjs already refuses a build/Release holding
+  // any other number of them. The scan below still covers a locally renamed
+  // target, but it must not outrank the real name: resolveCandidates returns a
+  // local build ALONE, so a stale or foreign .node that happens to sort earlier
+  // hides every prebuild behind a dlopen error naming a file this project never
+  // built.
+  const exact = path.join(directory, 'nanoepoch.node')
+  if (isLoadableFile(exact)) return exact
+
   let entries
   try {
-    entries = fs.readdirSync(directory).sort()
+    entries = fs.readdirSync(directory, { withFileTypes: true })
   } catch {
     return null
   }
-  const binary = entries.find((entry) => entry.endsWith('.node'))
+  // isFile() alone would drop a symlink, and a directory named something.node
+  // would otherwise be handed to require().
+  const binary = entries
+    .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith('.node'))
+    .map((entry) => entry.name)
+    .sort()[0]
   return binary ? path.join(directory, binary) : null
 }
 
 // Load order: local source build, then bundled prebuild. A local build wins so
-// that `npm run build` is what a contributor ends up testing -- which also
+// that `npm run dev:build` is what a contributor ends up testing -- which also
 // means a stale build/ silently shadows the shipped binary. The README says so
 // under Development, and the negative-control test in CI deletes both
 // directories for exactly this reason.
@@ -208,7 +234,7 @@ function loadErrorMessage (attempts) {
     '       Windows       : Visual Studio Build Tools, "Desktop development with C++"',
     '                       (Visual Studio 2026 also requires node-gyp >= 12.1)',
     '     then: git clone https://github.com/eg97park/nanoepoch',
-    '           cd nanoepoch && npm install && npm run build',
+    '           cd nanoepoch && npm install && npm run dev:build',
     '           npm install /path/to/nanoepoch   (from your own project)',
     '  4. Still stuck? Report it with the block above:',
     '       https://github.com/eg97park/nanoepoch/issues/new'
@@ -279,6 +305,12 @@ module.exports = {
 
 // Unstable test hooks. Deliberately non-enumerable and absent from the
 // TypeScript definitions: not public API, removable in any release.
+//
+// They stay in the published package rather than being stripped from it: the
+// release workflow runs this suite against the prebuilt binaries that ship, so
+// a hook that exists only in a development build would leave the shipped
+// artifact untested exactly where the tests are most exact. See the longer note
+// above ne_filetime_to_ns_js in src/nanoepoch.c.
 Object.defineProperty(module.exports, '_filetimeToNs', {
   value: binding._filetimeToNs,
   enumerable: false,

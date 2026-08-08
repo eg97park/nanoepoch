@@ -1,0 +1,13 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/eg97park/nanoepoch/security/advisories/new
+    about: >-
+      Please report vulnerabilities privately rather than in a public issue.
+      See SECURITY.md for what is in and out of scope.
+  - name: Timestamps are wrong, or go backwards
+    url: https://github.com/eg97park/nanoepoch#this-clock-can-go-backwards
+    about: >-
+      nanoepoch reports what the OS realtime clock says. That clock is not
+      monotonic and its accuracy is your NTP configuration — both are covered in
+      the README before you file.
