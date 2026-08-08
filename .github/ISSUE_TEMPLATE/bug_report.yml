@@ -1,0 +1,78 @@
+name: Bug report
+description: Something does not work — a load failure, a wrong value, a build problem
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If `require('nanoepoch')` threw, the error it printed already contains
+        almost everything needed to answer this. The package prints that block
+        and then points here on purpose — please paste it in full.
+
+  - type: textarea
+    id: load-error
+    attributes:
+      label: The nanoepoch error block, if you got one
+      description: >-
+        Everything from `nanoepoch@...: failed to load the native addon` down to
+        the end, including the `detected`, `looked`, `prebuilt`, `bundled`, and
+        `verdict` lines and any load attempts. Leave this empty if the package
+        loaded fine and the problem is something else.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected instead
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: 'Output of: node -p "process.platform + ''-'' + process.arch"'
+      placeholder: linux-x64
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: 'Output of: node --version'
+      placeholder: v24.19.0
+    validations:
+      required: true
+
+  - type: input
+    id: nanoepoch
+    attributes:
+      label: nanoepoch version
+      description: 'Output of: node -p "require(''nanoepoch/package.json'').version"'
+      placeholder: 0.3.1
+    validations:
+      required: true
+
+  - type: input
+    id: container
+    attributes:
+      label: Container image, if any
+      description: >-
+        Alpine and Debian resolve to different binaries, and a glibc Node inside
+        an Alpine image is a case the loader handles specially.
+      placeholder: node:24-alpine
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: bundler
+    attributes:
+      label: Is this package going through a bundler?
+      options:
+        - label: >-
+            Yes — webpack, esbuild, ncc, rollup, or similar. (See the Bundlers
+            section of the README: the package has to be marked external.)
+          required: false
