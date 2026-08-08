@@ -53,8 +53,35 @@ function makeTree (mutate = () => {}) {
 
 function run (root) {
   const result = spawnSync(process.execPath, [script, '--root', root], { encoding: 'utf8' })
-  return { status: result.status, out: result.stdout + result.stderr }
+  return { status: result.status, out: result.stdout + result.stderr, stdout: result.stdout }
 }
+
+test('the gate writes nothing to stdout, whichever way it concludes', () => {
+  // This script runs as prepublishOnly, and npm's --json modes use stdout as a
+  // data channel. `npm publish --dry-run --json > file` puts whatever a
+  // lifecycle script printed at the TOP of that file, ahead of the JSON, and
+  // the release parses exactly that file to confirm npm is not about to upload
+  // a manifest carrying an install script. So the 0.4.0 release failed at the
+  // step whose job is to catch install-time execution -- because the gate had
+  // announced, on stdout, that all eight binaries were fine.
+  //
+  // Deliberately not gated on `skip`. The bug was on the SUCCESS path, which
+  // needs eight real binaries and would therefore have been skipped in every
+  // checkout that does not have them -- including the one where this was
+  // written. So the success path is pinned at the source instead, where it can
+  // be checked anywhere: this script must contain no console.log at all.
+  const source = readFileSync(script, 'utf8')
+  assert.deepEqual(source.match(/console\.log/g) ?? [], [],
+    'verify-prebuilds.mjs must report through stderr; a console.log corrupts `npm publish --json`')
+
+  // And the failing path at runtime, which needs no fixtures: an empty root
+  // has no prebuilds to find.
+  const empty = mkdtempSync(join(tmpdir(), 'nanoepoch-empty-'))
+  fixtures.push(empty)
+  const result = run(empty)
+  assert.equal(result.status, 1, 'an empty tree must fail the gate')
+  assert.equal(result.stdout, '', `the gate printed to stdout on failure:\n${result.stdout}`)
+})
 
 // Some cases run the gate from a synthetic package root, so that its own
 // package.json is the one under test. The gate imports scripts/lib/, so a copy
