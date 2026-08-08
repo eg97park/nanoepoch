@@ -156,6 +156,32 @@ test('the libraries --as-needed should have dropped are refused', () => {
   assert.match(fault, /must link exactly libc\.so\.6/)
 })
 
+test('aarch64 glibc may name the dynamic linker, and need not', () => {
+  // What the 0.4.0 release actually produced. ld.so is not a dependency -- it
+  // is what processes DT_NEEDED, mapped before the first entry is read -- so
+  // naming it costs nothing, unlike the four libraries above.
+  assert.deepEqual(
+    faults(elf64({ needed: ['ld-linux-aarch64.so.1', 'libc.so.6'] }), 'linux-arm64-glibc'), [])
+
+  // Tolerated, not demanded: a toolchain that stops emitting it has produced
+  // the tidier binary and must not fail a release for it.
+  assert.deepEqual(faults(elf64({ needed: ['libc.so.6'] }), 'linux-arm64-glibc'), [])
+})
+
+test('the linker allowance does not weaken the --as-needed check that shares it', () => {
+  // The allowance is one name on one target. It must not become a hole that a
+  // real dependency can hide in, and it must not spread to the arch where the
+  // toolchain does not do this.
+  const [withLibrary] = faults(
+    elf64({ needed: ['ld-linux-aarch64.so.1', 'libstdc++.so.6', 'libc.so.6'] }), 'linux-arm64-glibc')
+  assert.match(withLibrary, /libstdc\+\+\.so\.6/,
+    'the diagnostic must name everything the binary links, not the filtered list')
+
+  assert.match(faults(elf64({ needed: ['ld-linux-x86-64.so.2', 'libc.so.6'] }), 'linux-x64-glibc')[0],
+    /must link exactly libc\.so\.6/,
+    'x86-64 glibc does not do this, so seeing it there is a change worth stopping for')
+})
+
 test('a musl-tagged binary that links glibc is refused, and the reverse', () => {
   assert.match(faults(elf64({ needed: ['libc.so.6'] }), 'linux-x64-musl')[0],
     /must link exactly libc\.musl-x86_64\.so\.1/)
