@@ -8,6 +8,19 @@ This file, not the GitHub release notes, is the record. The notes are generated
 from pull request titles, and this repository commits to `main` directly, so
 they say almost nothing.
 
+## Unreleased
+
+### Documentation
+
+- `RELEASING.md`: the release procedure, what is safe to retry and what is not,
+  and what actually went wrong shipping 0.4.0. Not in the tarball.
+- The claim that the Linux binaries link `libc` and nothing else is corrected in
+  both the README and the 0.4.0 entry below. The aarch64 glibc binary also names
+  `ld-linux-aarch64.so.1`, and anyone running `readelf -d` would have seen the
+  documentation contradict the artifact.
+- A fourth never-do in `SECURITY.md`: nothing npm runs as a lifecycle script may
+  write to stdout, because npm's `--json` modes read it as data.
+
 ## 0.4.0 — 2026-08-08
 
 ### Added
@@ -51,7 +64,10 @@ they say almost nothing.
   builds had both already, from Alpine's toolchain defaults — and Control Flow
   Guard was off on both Windows targets. The Linux binaries now link `libc` and
   nothing else, where they used to pull in `libstdc++`, `libm`, `libgcc_s`, and
-  `libpthread` without using a symbol from any of them.
+  `libpthread` without using a symbol from any of them. The one addition is on
+  aarch64 glibc, which also names `ld-linux-aarch64.so.1` — the dynamic loader
+  itself, already mapped before it reads a single `DT_NEEDED` entry, and the
+  only name the gate tolerates beside the exact set.
 - The release gate reads each binary's dynamic section and load config: exact
   library set, RELRO, `BIND_NOW`, stack canary, non-executable stack, Control
   Flow Guard, whether it was really stripped, and that the glibc and macOS
