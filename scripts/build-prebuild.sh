@@ -25,9 +25,14 @@ if ! command -v node >/dev/null 2>&1; then
   esac
   archive="node-${NODE_VERSION}-linux-${node_arch}.tar.xz"
   curl -fsSLO "https://nodejs.org/dist/${NODE_VERSION}/${archive}"
+  # This Node compiles the binaries that ship, so "TLS said it was nodejs.org"
+  # is a thinner guarantee than it should be. SHASUMS256.txt is published beside
+  # the archive and pins the bytes.
+  curl -fsSLO "https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt"
+  grep " ${archive}\$" SHASUMS256.txt | sha256sum -c -
   mkdir -p /opt/node
   tar xf "${archive}" -C /opt/node --strip-components=1
-  rm -f "${archive}"
+  rm -f "${archive}" SHASUMS256.txt
   PATH="/opt/node/bin:${PATH}"
   export PATH
 fi
@@ -40,7 +45,7 @@ echo "build-prebuild: node $(node --version), $(uname -m), libc $(ldd --version 
 rm -rf node_modules build
 
 # --ignore-scripts so the install step does not build the addon a second time.
-npm install --ignore-scripts --no-audit --no-fund
+npm ci --ignore-scripts --no-audit --no-fund
 
 # Detects its own libc and puts ".glibc" or ".musl" in the filename. The loader
 # reads that tag at require time and refuses a binary built for the other libc,
@@ -48,7 +53,7 @@ npm install --ignore-scripts --no-audit --no-fund
 # ever loading the glibc build.
 #
 # Named make-prebuild, not prebuild: npm would treat a script called "prebuild"
-# as the implicit pre-hook of "build" and run it on every npm run build.
+# as the pre-hook of any script called "build", so the name is avoided.
 npm run make-prebuild
 
 # The build goes through build/ on the way to prebuilds/. Leaving it behind
