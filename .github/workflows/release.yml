@@ -615,24 +615,7 @@ jobs:
       - name: Confirm npm would upload a manifest that runs nothing
         run: |
           npm publish --dry-run --json > /tmp/dry-run.json
-          node -e '
-            const reported = JSON.parse(require("fs").readFileSync("/tmp/dry-run.json", "utf8"))
-            const entry = Array.isArray(reported) ? reported[0] : reported
-            const pkg = require("./package.json")
-            const lifecycle = ["preinstall", "install", "postinstall"].filter((name) => pkg.scripts?.[name])
-            if (lifecycle.length > 0 || pkg.gypfile !== false) {
-              console.error("the manifest npm is about to upload would run code at install time")
-              process.exit(1)
-            }
-            const files = (entry.files || []).map((file) => file.path)
-            const rootGyp = files.filter((file) => /^[^/]+\.gyp$/.test(file))
-            if (rootGyp.length > 0) {
-              console.error("npm would upload a tarball with a *.gyp at its root: " + rootGyp.join(", "))
-              process.exit(1)
-            }
-            console.log("npm would upload " + entry.filename + " (" + files.length + " files, integrity " + entry.integrity + ")")
-            require("fs").writeFileSync("/tmp/pack-integrity.txt", entry.integrity)
-          '
+          node scripts/check-publish-manifest.mjs /tmp/dry-run.json --integrity-to /tmp/pack-integrity.txt
       # Per-binary attestations, in the job that already holds id-token: write.
       # npm provenance covers the tarball and needs a registry round-trip to
       # check; these cover each .node file on its own, so a consumer can verify
