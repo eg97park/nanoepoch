@@ -25,6 +25,26 @@ export const NEEDED = {
   'linux-arm64-musl': ['libc.musl-aarch64.so.1']
 }
 
+// The one entry that is tolerated beside those sets, and only where it has
+// been observed. The dynamic linker is not a dependency: it is the code that
+// PROCESSES DT_NEEDED, already mapped by the kernel before the first entry is
+// read, so naming it costs no open, no mmap and no relocation. That is the
+// whole difference from the four libraries --as-needed removed, each of which
+// was found, loaded and relocated in full for symbols this addon never calls.
+//
+// aarch64 glibc records it where x86-64 glibc does not. Both arches of 0.3.1,
+// built before --as-needed, carried the same five libraries and neither named
+// ld.so; with --as-needed the x64 build resolves to libc alone while the arm64
+// one keeps a reference into the linker. Which symbol pulls it in has not been
+// established here -- it needs an aarch64 host -- so this is written as an
+// observation rather than as an explanation.
+//
+// Allowed, never required: a toolchain that stops emitting it must not fail a
+// release for having produced the tidier binary.
+export const DYNAMIC_LINKER = {
+  'linux-arm64-glibc': 'ld-linux-aarch64.so.1'
+}
+
 // The floor the README advertises. Checked as an upper bound on what the binary
 // requires: a toolchain bump that raised the real floor would otherwise make
 // the documentation quietly wrong on the machines least able to notice.
@@ -158,9 +178,13 @@ export function inspect (buffer, target, { skipMachine = false } = {}) {
   }
 
   const expected = NEEDED[target]
-  const actual = [...elf.needed].sort()
+  // Dropped before the comparison rather than added to the expected set, so
+  // the set keeps meaning "the libraries this addon actually needs" and its
+  // absence stays acceptable.
+  const linker = DYNAMIC_LINKER[target]
+  const actual = elf.needed.filter((library) => library !== linker).sort()
   if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
-    fault(`links against ${actual.join(', ') || '(nothing)'} but ${target} must link exactly ${expected.join(', ')}`)
+    fault(`links against ${elf.needed.join(', ') || '(nothing)'} but ${target} must link exactly ${expected.join(', ')}`)
   }
 
   if (target.endsWith('-glibc')) {
