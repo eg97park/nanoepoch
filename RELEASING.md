@@ -98,12 +98,30 @@ so the runbook arrives without anyone remembering where it is.
 
 ## What the first release after a toolchain change actually exercises
 
-CI builds **x64 only**. Four of the eight binaries are compiled with new flags,
-and checked by new gates, for the first time when the tag is pushed:
+CI compiles every supported target on every pull request, but it only builds
+two of the eight prebuilds the way a release builds them: `prebuild-linux-x64`
+runs `build-prebuild.sh` in `manylinux_2_28_x86_64` and `node:24-alpine`, then
+checks what comes out. That check belongs there and not on the test matrix
+because Ubuntu's GCC applies most of those flags by default — a local
+`npm run dev:build` would go green whether or not `binding.gyp` had any
+effect.
+
+**The other six binaries are first produced by that pipeline when the tag is
+pushed.** For four of them it is also the first time any hardening check sees
+them:
 
 - `linux-arm64` glibc, under `manylinux_2_28_aarch64`
-- `win32-arm64`
+- `linux-arm64` musl
 - `darwin-x64` and `darwin-arm64`
+
+Windows is the exception. MSVC does not set `/guard:cf` on its own, so a
+local build proves the flag reached the linker, and `ci.yml` runs that check
+on both `windows-latest` and `windows-11-arm`. macOS is the weakest of the
+four — its step *reports* what it found instead of failing on it, and the
+stack-protector assertion stays a note rather than a fault until a release
+has shown it true on both darwin targets. Nothing names `linux-arm64` at all;
+it is covered only by the sweep `verify-prebuilds.mjs` makes over all eight
+binaries just before publish.
 
 This is not a reason to avoid tagging — the gates run before `npm publish`, so
 the failure mode is a red release, not a bad artifact. It *is* a reason to

@@ -60,8 +60,9 @@ Prebuilt binaries ship inside the npm tarball for every supported platform, so
 no compiler, Python, or `node-gyp` is required.
 
 **Nothing runs at install time.** There is no install, preinstall, or
-postinstall script, and the tarball deliberately ships no `binding.gyp` — npm
-compiles a package that carries one even when it declares no script at all.
+postinstall script, and the tarball deliberately ships no `binding.gyp` at its
+root — npm compiles a package that carries one there even when it declares no
+script at all.
 Nothing is downloaded, nothing is compiled, and nothing is executed; the right
 binary is selected when you `require` the package. That is what makes this work
 offline, behind a firewall, and under `--ignore-scripts`.
@@ -244,9 +245,10 @@ branches before 1.0. Which package versions that covers is in
 [SECURITY.md](SECURITY.md).
 
 Anything outside this table has no automatic fallback: with no install script
-and no `binding.gyp` in the tarball, an unsupported platform fails loudly at
-`require` time instead of quietly compiling. Building from a clone still works —
-see [Development](#development) — and the load error spells out the steps.
+and no `binding.gyp` at the tarball root, an unsupported platform fails loudly
+at `require` time instead of quietly compiling. Building from a clone still
+works — see [Development](#development) — and the load error spells out the
+steps.
 
 ### There is no JavaScript fallback
 
@@ -427,8 +429,9 @@ Studio 2026).
 
 The script is called `dev:build` rather than `build` so that it reads as what
 it is. `npm run build` inside an *installed* nanoepoch would fail with
-`gyp: binding.gyp not found` — the tarball ships no `binding.gyp` — which is
-the exact symptom of the 0.3.0 breakage, on a package that is in fact fine.
+`gyp: binding.gyp not found` — the tarball ships no `binding.gyp` at its
+root — which is the exact symptom of the 0.3.0 breakage, on a package that is
+in fact fine.
 
 Building from source needs Node 22.22 or newer — the `node-gyp` devDependency
 supports `^22.22.2 || ^24.15.0 || >=26`. Consumers are unaffected: the

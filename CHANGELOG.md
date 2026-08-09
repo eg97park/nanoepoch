@@ -10,10 +10,27 @@ they say almost nothing.
 
 ## Unreleased
 
+### Removed
+
+- The `merge-build-info` and `test:smoke` npm scripts. Neither was ever
+  invoked: the workflows run `scripts/build-info.mjs --merge` and
+  `node --test --test-reporter=tap` directly, the second because it needs TAP
+  output the alias could not produce. An alias nothing calls is an alias
+  nothing notices breaking.
+
 ### Documentation
 
 - `RELEASING.md`: the release procedure, what is safe to retry and what is not,
   and what actually went wrong shipping 0.4.0. Not in the tarball.
+- `README.md` said in three places that the tarball ships no `binding.gyp`.
+  That stopped being true in 0.4.0, when `build-recipe/` began shipping one.
+  All three now carry the qualifier the other two mentions already had — none
+  *at the root*, which is the only place npm looks before deciding to compile.
+- `RELEASING.md`'s account of what a first tag exercises named `win32-arm64`,
+  which `ci.yml` has been checking on `windows-11-arm` all along, and left out
+  `linux-arm64` musl, which nothing builds until the tag. It now separates the
+  six binaries the release pipeline builds first from the four that a hardening
+  check first sees there.
 - The claim that the Linux binaries link `libc` and nothing else is corrected in
   both the README and the 0.4.0 entry below. The aarch64 glibc binary also names
   `ld-linux-aarch64.so.1`, and anyone running `readelf -d` would have seen the
