@@ -180,7 +180,7 @@ jobs:
         run: |
           node scripts/check-hardening.mjs prebuilds/linux-x64/nanoepoch.glibc.node --as linux-x64-glibc
           node scripts/check-hardening.mjs prebuilds/linux-x64/nanoepoch.musl.node --as linux-x64-musl
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prebuilds-linux-x64
           path: prebuilds/
