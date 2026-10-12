@@ -113,7 +113,7 @@ jobs:
       - name: Show what was produced
         shell: bash
         run: find prebuilds build-info -type f -exec ls -l {} +
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prebuilds-${{ matrix.label }}
           path: prebuilds/
@@ -121,7 +121,7 @@ jobs:
       # A second artifact rather than a second path in the one above: the verify
       # jobs download prebuilds-* straight into prebuilds/, which only works
       # while that artifact's root IS the contents of prebuilds/.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: buildinfo-${{ matrix.label }}
           path: build-info/
@@ -161,12 +161,12 @@ jobs:
       # reported here so a human can see it before it becomes one.
       - name: Report what the macOS binary was built with
         run: node scripts/check-hardening.mjs prebuilds/${{ matrix.label }}/nanoepoch.node --as ${{ matrix.label }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prebuilds-${{ matrix.label }}
           path: prebuilds/
           if-no-files-found: error
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: buildinfo-${{ matrix.label }}
           path: build-info/
@@ -212,12 +212,12 @@ jobs:
             node:24-alpine sh scripts/build-prebuild.sh
       - name: Show what was produced
         run: find prebuilds build-info -type f -exec ls -l {} +
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prebuilds-linux-${{ matrix.arch }}
           path: prebuilds/
           if-no-files-found: error
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: buildinfo-linux-${{ matrix.arch }}
           path: build-info/
